@@ -21,7 +21,7 @@ Status: **v0.1 — working core.** 61 models across 16 providers, 5 tool adapter
 ## Install
 
 ```bash
-git clone rep DragonEye && cd DragonEye
+git clone https://github.com/SanchitKumaRR/DragonEye.git DragonEye && cd DragonEye
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pip install -e .
