@@ -384,15 +384,28 @@ def run_assets(con: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
     rows = con.execute(
         """SELECT a.*, ra.is_new
              FROM run_assets ra JOIN assets a ON a.id = ra.asset_id
-            WHERE ra.run_id = ? ORDER BY a.kind, a.value""",
+            WHERE ra.run_id = ? AND a.in_scope = 1 ORDER BY a.kind, a.value""",
         (run_id,),
     ).fetchall()
     return _rows(rows)
 
 
 def count_assets(con: sqlite3.Connection, program_id: int) -> int:
-    row = con.execute("SELECT COUNT(*) AS n FROM assets WHERE program_id = ?", (program_id,)).fetchone()
+    row = con.execute(
+        "SELECT COUNT(*) AS n FROM assets WHERE program_id = ? AND in_scope = 1",
+        (program_id,),
+    ).fetchone()
     return int(row["n"]) if row else 0
+
+
+def count_runs(con: sqlite3.Connection, program_id: int) -> int:
+    row = con.execute("SELECT COUNT(*) AS n FROM runs WHERE program_id = ?", (program_id,)).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def set_asset_scope(con: sqlite3.Connection, asset_id: int, in_scope: bool) -> None:
+    con.execute("UPDATE assets SET in_scope = ? WHERE id = ?", (int(in_scope), asset_id))
+    con.commit()
 
 
 def diff_assets(con: sqlite3.Connection, program_id: int, run_id: str) -> list[dict[str, Any]]:
@@ -400,7 +413,7 @@ def diff_assets(con: sqlite3.Connection, program_id: int, run_id: str) -> list[d
     rows = con.execute(
         """SELECT a.*
              FROM run_assets ra JOIN assets a ON a.id = ra.asset_id
-            WHERE ra.run_id = ? AND a.program_id = ? AND ra.is_new = 1
+            WHERE ra.run_id = ? AND a.program_id = ? AND a.in_scope = 1 AND ra.is_new = 1
             ORDER BY a.kind, a.value""",
         (run_id, program_id),
     ).fetchall()

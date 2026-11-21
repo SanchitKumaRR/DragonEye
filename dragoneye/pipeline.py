@@ -13,6 +13,7 @@ Invariants:
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import sqlite3
 import time
@@ -228,10 +229,30 @@ def _stage(
 def _stage_seed(ctx: RunContext) -> None:
     seeds = ctx.scope.roots()
     if not seeds:
-        ctx.log("  ! no seedable domain rules in scope (CIDR/regex/ASN only) - nothing to expand")
-    assets = [{"kind": "domain", "value": seed, "meta": {"source": "scope", "seed": True}} for seed in seeds]
+        ctx.log("  ! no seedable domain/IP rules in scope (CIDR/regex/ASN only) - nothing to expand")
+    assets = []
+    for seed in seeds:
+        kind = "ip" if _is_ip(seed) else "domain"
+        assets.append({"kind": kind, "value": seed, "meta": {"source": "scope", "seed": True}})
     _ingest(ctx, assets, "scope", force_in_scope=True)
     ctx.note("seeds", len(seeds))
+
+
+def _hosts(ctx: RunContext) -> list[str]:
+    """Every host-looking asset (domains and bare IPs), in insertion order."""
+    return [
+        a["value"]
+        for a in ctx.assets.values()
+        if a["kind"] in ("domain", "ip")
+    ]
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _stage_subdomains(ctx: RunContext) -> None:
@@ -257,7 +278,7 @@ def _stage_subdomains(ctx: RunContext) -> None:
 
 def _stage_resolve(ctx: RunContext) -> None:
     adapter = get_adapter("dnsx")
-    domains = [a["value"] for a in ctx.assets.values() if a["kind"] == "domain"]
+    domains = _hosts(ctx)
     if not adapter or not domains:
         ctx.log("  - resolve: nothing to resolve")
         return
@@ -281,13 +302,14 @@ def _stage_resolve(ctx: RunContext) -> None:
 
 def _stage_probe(ctx: RunContext) -> None:
     adapter = get_adapter("httpx")
-    hosts = [a["value"] for a in ctx.assets.values() if a["kind"] == "domain"]
+    hosts = _hosts(ctx)
     if not adapter or not hosts:
         ctx.log("  - probe: nothing to probe")
         return
     if ctx.passive_only:
         ctx.log("  - probe: skipped (passive-only)")
         return
+    extra = ["-ports", ctx.cfg.probe_ports] if ctx.cfg.probe_ports else []
     result = execute(
         adapter,
         hosts,
@@ -298,6 +320,7 @@ def _stage_probe(ctx: RunContext) -> None:
         passive_only=ctx.passive_only,
         request_rate=ctx.cfg.request_rate,
         user_agent=ctx.cfg.user_agent,
+        extra_args=extra,
     )
     _record_tool(ctx, result)
     _ingest(ctx, result.assets, "httpx")
@@ -330,7 +353,7 @@ def _stage_crawl(ctx: RunContext) -> None:
 def _stage_scan(ctx: RunContext) -> None:
     adapter = get_adapter("nuclei")
     urls = [a["value"] for a in ctx.assets.values() if a["kind"] == "url"]
-    hosts = [a["value"] for a in ctx.assets.values() if a["kind"] == "domain"]
+    hosts = _hosts(ctx)
     targets = urls or hosts
     if not adapter or not targets:
         ctx.log("  - scan: nothing to scan")
@@ -397,6 +420,16 @@ def _ingest(
             continue
 
         meta = dict(item.get("meta") or {})
+        if kind == "domain":
+            bad, reason = _screen_resolved_ips(ctx, meta.get("ips") or [])
+            if bad:
+                existing = ctx.assets.pop((kind, value), None)
+                if existing:
+                    db.set_asset_scope(ctx.con, int(existing["id"]), False)
+                ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
+                ctx.log(f"    · dropped {value}: {reason}")
+                continue
+
         current = ctx.assets.get((kind, value))
         if current:
             current["meta"].update(meta)
@@ -473,12 +506,32 @@ def _ingest_finding(
         ctx.log(f"    * new finding [{record['severity']}] {record['title']} @ {record['asset']}")
 
 
+def _screen_resolved_ips(ctx: RunContext, ips: list[str]) -> tuple[bool, str]:
+    for raw in ips:
+        try:
+            decision = ctx.scope.screen_ip(str(raw))
+        except ScopeError:
+            continue
+        if not decision.allowed:
+            return True, decision.reason
+    return False, ""
+
+
 def _asset_id_for(ctx: RunContext, matched: str, host: str) -> int | None:
+    # Exact match wins, so a finding on /admin is attached to /admin and not to
+    # the parent URL that happens to share the same host.
     for (kind, value), record in ctx.assets.items():
         if value == matched:
             return record["id"]
-        if host and kind == "url" and host in value:
-            return record["id"]
+    if host:
+        for (kind, value), record in ctx.assets.items():
+            if kind not in ("url", "domain"):
+                continue
+            try:
+                if normalize_host(value) == host:
+                    return record["id"]
+            except ScopeError:
+                continue
     if not matched:
         return None
     try:
@@ -615,10 +668,12 @@ def load_context(con: sqlite3.Connection, run_id: str, cfg: Config, echo=print) 
 
 def pipeline_summary(con: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     run = db.get_run(con, run_id) or {}
+    findings = db.run_findings(con, run_id)
     return {
         "run": run,
         "assets": db.run_assets(con, run_id),
-        "findings": db.run_findings(con, run_id),
+        "findings": findings,
+        "new_findings": [f for f in findings if f.get("is_new")],
         "tools": db.tool_runs(con, run_id),
         "new_assets": db.diff_assets(con, int(run["program_id"]), run_id) if run else [],
         "calibration": db.calibration(con, int(run["program_id"])) if run else [],

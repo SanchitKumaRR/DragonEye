@@ -177,3 +177,8 @@ def test_check_url_with_path():
 def test_roots_only_domains():
     s = scope(["example.com", "*.other.com", "10.0.0.0/8", "re:x"])
     assert s.roots() == ["example.com"]
+
+
+def test_roots_include_single_ips_but_not_cidrs():
+    s = scope(["127.0.0.1", "10.0.0.0/8"])
+    assert s.roots() == ["127.0.0.1"]

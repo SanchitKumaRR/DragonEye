@@ -12,6 +12,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from . import __version__, db
 from .config import (
@@ -49,6 +50,28 @@ SEV_STYLE = {
     "low": "green",
     "info": "cyan",
 }
+
+BANNER = r"""
+████████▄     ▄████████    ▄████████    ▄██████▄   ▄██████▄  ███▄▄▄▄      ▄████████ ▄██   ▄      ▄████████
+███   ▀███   ███    ███   ███    ███   ███    ███ ███    ███ ███▀▀▀██▄   ███    ███ ███   ██▄   ███    ███
+███    ███   ███    ███   ███    ███   ███    █▀  ███    ███ ███   ███   ███    █▀  ███▄▄▄███   ███    █▀
+███    ███  ▄███▄▄▄▄██▀   ███    ███  ▄███        ███    ███ ███   ███  ▄███▄▄▄     ▀▀▀▀▀▀███  ▄███▄▄▄
+███    ███ ▀▀███▀▀▀▀▀   ▀███████████ ▀▀███ ████▄  ███    ███ ███   ███ ▀▀███▀▀▀     ▄██   ███ ▀▀███▀▀▀
+███    ███ ▀███████████   ███    ███   ███    ███ ███    ███ ███   ███   ███    █▄  ███   ███   ███    █▄
+███   ▄███   ███    ███   ███    ███   ███    ███ ███    ███ ███   ███   ███    ███ ███   ███   ███    ███
+████████▀    ███    ███   ███    █▀    ████████▀   ▀██████▀   ▀█   █▀    ██████████  ▀█████▀    ██████████
+             ███    ███
+"""
+
+
+def _banner() -> None:
+    """Print the wordmark in red without letting rich wrap or crop it."""
+    width = max(len(line) for line in BANNER.splitlines())
+    Console(width=width).print(Text(BANNER, style="bold red"), no_wrap=True, crop=False)
+    console.print(
+        f"  [red]scope-aware recon[/red] [dim]v{__version__}[/dim] · "
+        "[dim]only scan assets you are authorized to test[/dim]\n"
+    )
 
 
 def _con():
@@ -96,6 +119,7 @@ def _run_or_exit(ref: str) -> dict:
 @app.command()
 def init() -> None:
     """Create config/data directories and a default config."""
+    _banner()
     ensure_dirs()
     cfg = load_config()
     save_config(cfg)
@@ -163,6 +187,7 @@ def run(
     program: str = typer.Argument(..., help="Program name."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print commands, send no traffic."),
     passive: bool = typer.Option(False, "--passive", help="Passive tools only."),
+    active: bool = typer.Option(False, "--active", help="Force active tools even if config is passive-only."),
     usage: Optional[str] = typer.Option(None, "--usage", help="off|low|balanced|high"),
     provider: Optional[str] = typer.Option(None, "--provider"),
     model: Optional[str] = typer.Option(None, "--model"),
@@ -178,6 +203,9 @@ def run(
         cfg.allow_private = True
     if no_llm:
         usage = "off"
+    if passive and active:
+        raise typer.BadParameter("--passive and --active are mutually exclusive")
+    passive_flag = True if passive else (False if active else None)
 
     try:
         Scope(program_row["in_scope"], program_row["out_of_scope"], allow_private=cfg.allow_private)
@@ -192,7 +220,7 @@ def run(
             program_row,
             cfg,
             dry_run=dry_run,
-            passive_only=passive or None,
+            passive_only=passive_flag,
             llm_usage=usage,
             provider=provider,
             model=model,
@@ -287,7 +315,7 @@ def show(run_id: str = typer.Argument("last")) -> None:
         f"status   : {row['status']}\n"
         f"duration : {stats.get('duration_seconds', 0)}s\n"
         f"assets   : {len(data['assets'])} ({len(data['new_assets'])} new)\n"
-        f"findings : {len(data['findings'])} ({len(data['new_findings']) if 'new_findings' in data else '-'} new)\n"
+        f"findings : {len(data['findings'])} ({len(data['new_findings'])} new)\n"
         f"scope    : {stats.get('skipped_scope', 0)} target(s) rejected",
         title="run",
     ))
@@ -421,6 +449,7 @@ def serve(
     """Start the local web GUI (binds 127.0.0.1)."""
     import uvicorn
 
+    _banner()
     cfg = load_config()
     host = host or cfg.web_host
     port = port or cfg.web_port
@@ -628,10 +657,53 @@ def _coerce(value: str, current: object) -> object:
             return float(value)
         except ValueError as exc:
             raise typer.BadParameter(f"expected a number, got {value!r}") from exc
+    if current is None:
+        # Infer from the literal so optional numeric/boolean settings stay typed.
+        lowered = value.strip().lower()
+        if lowered in ("true", "false"):
+            return lowered == "true"
+        if lowered in ("none", "null", ""):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        try:
+            return float(value)
+        except ValueError:
+            pass
     return value
 
 
+def _quick_help() -> None:
+    """Landing page for a bare `dragoneye` invocation."""
+    table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    table.add_column(style="bold red", no_wrap=True)
+    table.add_column(style="dim", no_wrap=True)
+    for cmd, desc in (
+        ("dragoneye init", "create config, database and run directories"),
+        ("dragoneye program add NAME --in-text 'example.com'", "define an authorized scope"),
+        ("dragoneye tools", "check which recon binaries are installed"),
+        ("dragoneye run NAME --active", "scan, triage and write a report"),
+        ("dragoneye show last", "results of the most recent run"),
+        ("dragoneye serve --open", "local web GUI on 127.0.0.1"),
+        ("dragoneye --help", "all commands and options"),
+    ):
+        table.add_row(cmd, desc)
+    Console(width=110).print(table)
+
+
 def main() -> None:
+    argv = sys.argv[1:]
+    if not argv:
+        _banner()
+        _quick_help()
+        raise SystemExit(0)
+    if argv[0] in ("-h", "--help"):
+        _banner()
+    elif argv[0] in ("-V", "--version"):
+        _banner()
+        raise SystemExit(0)
     app()
 
 

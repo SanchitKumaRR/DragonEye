@@ -101,7 +101,7 @@ PROVIDERS: dict[str, Provider] = {
         ("local-model",), local=True,
     ),
     "vllm": Provider(
-        "vllm", "vLLM (local)", "http://127.0.0.1:8000/v1", "bearer",
+        "vllm", "vLLM (local)", "http://127.0.0.1:8000/v1", "none",
         ("local-model",), env="VLLM_API_KEY", local=True,
     ),
     "azure": Provider(
@@ -187,12 +187,15 @@ def api_key_for(provider: Provider) -> str | None:
 
 def extra_headers(provider: Provider) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
+    key = api_key_for(provider)
     if provider.auth == "x-api-key":
-        key = api_key_for(provider)
         if key:
             headers["x-api-key"] = key
             # Anthropic's OpenAI-compatible layer also accepts bearer auth.
             headers["Authorization"] = f"Bearer {key}"
+    elif provider.auth == "none" and key:
+        # Local servers that optionally accept a token.
+        headers["Authorization"] = f"Bearer {key}"
     headers.update(provider.extra_headers)
     if provider.id == "openrouter":
         headers["HTTP-Referer"] = "https://github.com/dragoneye"

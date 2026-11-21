@@ -33,6 +33,7 @@ def execute(
     passive_only: bool = False,
     request_rate: int = 25,
     user_agent: str | None = None,
+    extra_args: Sequence[str] = (),
 ) -> ToolResult:
     result = ToolResult(tool=adapter.spec.name)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -41,12 +42,6 @@ def execute(
         result.status = "skipped"
         result.message = "active tool skipped (passive-only mode)"
         log(f"  ! {adapter.spec.name}: {result.message}")
-        return result
-
-    if not adapter.available():
-        result.status = "missing"
-        result.message = adapter.spec.install_hint
-        log(f"  ! {adapter.spec.name}: not installed -> {adapter.spec.install_hint}")
         return result
 
     allowed, rejected = scope.filter(targets)
@@ -62,15 +57,24 @@ def execute(
 
     cmd = adapter.build(list(allowed), workdir)
     cmd = _apply_limits(cmd, adapter, request_rate, user_agent)
+    if extra_args:
+        cmd = [*cmd, *[str(arg) for arg in extra_args]]
     result.command = cmd
 
     inputs = workdir / "inputs.txt"
     inputs.write_text("\n".join(allowed) + "\n")
 
     if dry_run:
+        missing = "" if adapter.available() else "  [binary not installed]"
         result.status = "dry-run"
-        result.message = f"would run: {' '.join(cmd)}"
-        log(f"  > {adapter.spec.name} (dry-run): {' '.join(cmd)}")
+        result.message = f"would run: {' '.join(cmd)}{missing}"
+        log(f"  > {adapter.spec.name} (dry-run): {' '.join(cmd)}{missing}")
+        return result
+
+    if not adapter.available():
+        result.status = "missing"
+        result.message = adapter.spec.install_hint
+        log(f"  ! {adapter.spec.name}: not installed -> {adapter.spec.install_hint}")
         return result
 
     out_path = workdir / "out.txt"

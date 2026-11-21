@@ -284,7 +284,8 @@ async function boot() {
     const session = await api("/api/session");
     TOKEN = session.token;
     $("version").textContent = "v" + session.version;
-    await Promise.all([loadTools(), loadModels(), loadConfig()]);
+    await Promise.all([loadTools(), loadModels()]);
+    await loadConfig();
     await loadPrograms();
     bind();
   } catch (err) {

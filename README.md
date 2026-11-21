@@ -13,7 +13,7 @@ seed -> subdomains -> resolve -> probe -> crawl -> scan -> triage -> report
 ```
 
 Status: **v0.1 — working core.** 61 models across 16 providers, 5 tool adapters,
-36 tests, resumable pipeline, Markdown/JSON/HTML reports. See
+41 tests, resumable pipeline, Markdown/JSON/HTML reports. See
 [Not built yet](#not-built-yet) for the honest gaps.
 
 ---
@@ -37,6 +37,19 @@ dragoneye tools          # what's installed, what's missing, how to get it
 A missing tool only skips its stage. The run still completes and the report says
 which stages were skipped.
 
+### `dragoneye` on your PATH
+
+With the venv active, the `dragoneye` console script is already available. To use
+it without activating anything, link it into `~/.local/bin` (on PATH by default on
+most distros):
+
+```bash
+ln -sf "$PWD/.venv/bin/dragoneye" ~/.local/bin/dragoneye
+dragoneye            # banner + quick command list
+```
+
+Or use `pipx install .` for a fully isolated install.
+
 ## Quickstart
 
 ```bash
@@ -48,6 +61,9 @@ dragoneye run acme --passive
 dragoneye show last
 dragoneye report last --open
 ```
+
+Running `dragoneye` with no arguments prints the red wordmark and the short command
+list; `dragoneye --help` shows every option.
 
 Scope from a file (HackerOne/Bugcrowd paste works):
 
@@ -72,7 +88,7 @@ then deny-by-default.
 |---|---|
 | `example.com` | apex **and** all subdomains |
 | `*.example.com` or `.example.com` | subdomains only (not apex) |
-| `10.10.0.0/16` | CIDR (IPs and hosts resolving into it) |
+| `10.10.0.0/16` | CIDR (IPs, and hostnames that resolve into it) |
 | `203.0.113.7` | single IP |
 | `re:^api\d+\.` | regex against the hostname |
 | `AS15169` | ASN (when the asset carries one) |
@@ -87,6 +103,9 @@ Guarantees:
 * Private/loopback/reserved IPs are blocked unless `--allow-private`.
 * Every tool receives a **pre-filtered** target list; filtering happens in one
   place (`tools/runner.py`), not per adapter.
+* DNS answers are screened too: an in-scope hostname that resolves into an
+  out-of-scope CIDR, a private range or a metadata endpoint is dropped (and
+  recorded) before any tool can reach it.
 * Every decision is written to the audit log.
 
 ## Models
@@ -227,7 +246,7 @@ Ordered roughly by value:
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q         # 36 tests
+.venv/bin/python -m pytest -q         # 42 tests
 ```
 
 The scope engine has the densest test coverage on purpose — it is the component

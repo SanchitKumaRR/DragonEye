@@ -280,25 +280,68 @@ class Scope:
 
         return ScopeDecision(False, host, "not matched by any in-scope rule")
 
+    def screen_ip(self, target: str) -> ScopeDecision:
+        """Screening for IPs *discovered* via DNS for an allowed hostname.
+
+        A domain being in scope does not mean every address it resolves to is.
+        Unlike `check()`, an unmatched IP is not rejected (most programs scope by
+        domain only), but metadata endpoints, private ranges and explicit deny
+        rules still win.
+        """
+        host = normalize_host(target)
+        try:
+            ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = ipaddress.ip_address(host)
+        except ValueError:
+            return ScopeDecision(True, host, "not an IP")
+        if ip is None:
+            return ScopeDecision(True, host, "not an IP")
+
+        for network in BLOCKED_NETWORKS:
+            if ip in network:
+                return ScopeDecision(False, host, "resolved to a cloud metadata endpoint")
+        if not self.allow_private and (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return ScopeDecision(
+                False,
+                host,
+                "resolved to a private/loopback/reserved address (use --allow-private)",
+            )
+        for rule in self.deny:
+            if rule.matches(host):
+                return ScopeDecision(False, host, f"resolved into out-of-scope rule {rule.raw!r}", rule.raw)
+        return ScopeDecision(True, host, "no explicit denial")
+
     def in_scope(self, target: str, asn: int | None = None) -> bool:
         return self.check(target, asn).allowed
 
     def filter(self, targets: Iterable[str]) -> tuple[list[str], list[ScopeDecision]]:
-        """Split targets into (allowed hosts, rejected decisions)."""
+        """Split targets into (allowed targets, rejected decisions).
+
+        Allowed targets are returned **as given** (a URL stays a URL), because
+        tools like katana and nuclei need the scheme and path. Deduplication is
+        on the literal target, not the host.
+        """
         allowed: list[str] = []
         rejected: list[ScopeDecision] = []
         seen: set[str] = set()
         for target in targets:
+            literal = str(target).strip()
+            if not literal or literal.lower() in seen:
+                continue
             try:
-                decision = self.check(target)
+                decision = self.check(literal)
             except ScopeError as exc:
-                rejected.append(ScopeDecision(False, str(target), f"invalid target: {exc}"))
+                rejected.append(ScopeDecision(False, literal, f"invalid target: {exc}"))
                 continue
-            if decision.host in seen:
-                continue
-            seen.add(decision.host)
+            seen.add(literal.lower())
             if decision.allowed:
-                allowed.append(decision.host)
+                allowed.append(literal)
             else:
                 rejected.append(decision)
         return allowed, rejected
@@ -306,10 +349,14 @@ class Scope:
     # -- introspection -----------------------------------------------------
 
     def roots(self) -> list[str]:
-        """Seed hosts implied by the in-scope rules (skip regex/asn/CIDR)."""
+        """Seed hosts implied by the in-scope rules (skip regex/asn/CIDR).
+
+        Single IPs are seedable (useful for labs and IP-scoped programs); CIDR
+        blocks are not expanded, because nobody wants 65k seeds.
+        """
         seeds: list[str] = []
         for rule in self.allow:
-            if rule.kind == "domain" and rule.value not in seeds:
+            if rule.kind in ("domain", "ip") and rule.value not in seeds:
                 seeds.append(rule.value)
         return seeds
 

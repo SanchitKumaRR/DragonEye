@@ -91,6 +91,10 @@ class ConfigIn(BaseModel):
     api_key: Optional[str] = None
 
 
+class ValidationIn(BaseModel):
+    validated: Optional[str] = None
+
+
 # --- static ---------------------------------------------------------------
 
 
@@ -112,7 +116,7 @@ def list_programs(con=Depends(get_db)) -> dict[str, Any]:
     rows = db.list_programs(con)
     for row in rows:
         row["asset_count"] = db.count_assets(con, int(row["id"]))
-        row["run_count"] = len(db.list_runs(con, int(row["id"]), 1))
+        row["run_count"] = db.count_runs(con, int(row["id"]))
     return {"programs": rows}
 
 
@@ -243,7 +247,9 @@ def get_run(run_id: str, con=Depends(get_db)) -> dict[str, Any]:
 
 
 @app.get("/api/runs/{run_id}/events")
-async def run_events(run_id: str) -> StreamingResponse:
+async def run_events(run_id: str, con=Depends(get_db)) -> StreamingResponse:
+    if not db.get_run(con, run_id):
+        raise HTTPException(404, "run not found")
     log_path = runs_dir() / run_id / "run.log"
 
     async def stream():
@@ -330,7 +336,10 @@ def resume_run(run_id: str, con=Depends(get_db)) -> dict[str, Any]:
 
 
 @app.post("/api/findings/{finding_id}/validation", dependencies=[Depends(require_token)])
-def validate_finding(finding_id: int, validated: Optional[str] = None, con=Depends(get_db)) -> dict[str, Any]:
+def validate_finding(
+    finding_id: int, payload: Optional[ValidationIn] = None, con=Depends(get_db)
+) -> dict[str, Any]:
+    validated = payload.validated if payload else None
     if validated not in (None, "confirmed", "false-positive"):
         raise HTTPException(400, "validated must be confirmed, false-positive or omitted")
     if not db.get_finding(con, finding_id):

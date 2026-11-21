@@ -72,6 +72,8 @@ class Config:
     concurrency: int = 4
     # Per-tool request rate limit passed to tools that support it.
     request_rate: int = 25
+    # Ports httpx probes for bare hosts (nmap syntax).
+    probe_ports: str = "80,443,8080,8443"
     allow_private: bool = False
     passive_only: bool = False
     nuclei_severities: list[str] = field(

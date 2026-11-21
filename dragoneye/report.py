@@ -38,8 +38,10 @@ def build_report(con: sqlite3.Connection, run_id: str, outdir: Path) -> dict[str
 
 
 def collect(con: sqlite3.Connection, run_id: str) -> dict[str, Any]:
-    run = db.get_run(con, run_id) or {}
-    program = db.get_program(con, int(run["program_id"])) if run else {}
+    run = db.get_run(con, run_id)
+    if not run:
+        raise ValueError(f"run {run_id} not found")
+    program = db.get_program(con, int(run["program_id"])) or {}
     assets = db.run_assets(con, run_id)
     findings = db.run_findings(con, run_id)
 
@@ -332,12 +334,13 @@ def render_html(data: dict[str, Any]) -> str:
                 if finding.get("confidence") is not None
                 else "&mdash;"
             )
+            verdict = esc(str(finding.get("verdict"))) if finding.get("verdict") else "&mdash;"
             add("<tr>"
                 f"<td><span class=tag style='background:{color}22;color:{color}'>{esc(sev)}</span></td>"
                 f"<td>{esc(str(finding.get('title') or ''))}"
                 f"{' <span class=new>new</span>' if finding.get('is_new') else ''}</td>"
                 f"<td><code>{esc(str(finding.get('asset_value') or ''))}</code></td>"
-                f"<td>{conf}</td><td>{esc(str(finding.get('verdict') or '&mdash;'))}</td></tr>")
+                f"<td>{conf}</td><td>{verdict}</td></tr>")
         add("</table>")
 
         for finding in data["findings"]:
