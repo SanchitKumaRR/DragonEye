@@ -13,7 +13,7 @@ seed -> subdomains -> resolve -> probe -> crawl -> scan -> triage -> report
 ```
 
 Status: **v0.1 — working core.** 61 models across 16 providers, 5 tool adapters,
-41 tests, resumable pipeline, Markdown/JSON/HTML reports. See
+42 tests, resumable pipeline, Markdown/JSON/HTML reports. See
 [Not built yet](#not-built-yet) for the honest gaps.
 
 ---
