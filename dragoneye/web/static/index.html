@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DragonEye</title>
+<style>
+:root{
+  --bg:#080b10; --panel:#0f141d; --panel2:#141a25; --line:#1e2735; --line2:#2a3547;
+  --txt:#d9dfea; --dim:#8892a6; --acc:#57d9a3; --acc2:#59b6ff;
+  --crit:#ff4d6d; --high:#ff8a3d; --med:#f2c14e; --low:#5ec7a5; --info:#6ea8fe;
+  --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--txt);
+  font:13.5px/1.55 var(--mono);
+  background-image:radial-gradient(circle at 12% -10%,#0f1b1a 0,transparent 45%),
+                   radial-gradient(circle at 92% 0%,#101626 0,transparent 40%);
+}
+header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 22px;border-bottom:1px solid var(--line);
+  background:rgba(10,14,20,.85);backdrop-filter:blur(8px);
+  position:sticky;top:0;z-index:20;
+}
+.brand{font-size:17px;letter-spacing:.6px;font-weight:600}
+.brand span{color:var(--acc)}
+.brand em{color:var(--dim);font-style:normal;font-size:11px;letter-spacing:2px;text-transform:uppercase;margin-left:10px}
+.hdr-right{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:11.5px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--acc);box-shadow:0 0 8px var(--acc)}
+.dot.busy{background:var(--med);box-shadow:0 0 8px var(--med);animation:pulse 1.1s infinite}
+.dot.err{background:var(--crit);box-shadow:0 0 8px var(--crit)}
+@keyframes pulse{50%{opacity:.35}}
+.app{display:grid;grid-template-columns:290px 1fr;min-height:calc(100vh - 53px)}
+aside{border-right:1px solid var(--line);padding:16px 14px 40px;overflow:auto;max-height:calc(100vh - 53px)}
+.side-h{display:flex;align-items:center;justify-content:space-between;
+  color:var(--dim);font-size:10.5px;letter-spacing:1.6px;text-transform:uppercase;
+  margin:18px 4px 8px}
+.side-h:first-child{margin-top:0}
+main{padding:20px 26px 70px;overflow:auto;max-height:calc(100vh - 53px)}
+.hidden{display:none !important}
+
+button{
+  font:inherit;font-size:12px;background:var(--panel2);color:var(--txt);
+  border:1px solid var(--line2);border-radius:5px;padding:6px 12px;cursor:pointer;
+  transition:border-color .15s,background .15s;
+}
+button:hover{border-color:var(--acc);color:#fff}
+button.primary{background:#12382c;border-color:#1f6b52;color:#bdf5df}
+button.primary:hover{background:#17553f}
+button.danger{background:#2a1218;border-color:#5c2430;color:#ffb3c0}
+button.mini{font-size:10.5px;padding:3px 8px}
+button.wide{width:100%;margin-top:8px}
+button:disabled{opacity:.45;cursor:not-allowed}
+input,select,textarea{
+  width:100%;font:inherit;font-size:12.5px;background:#0a0e15;color:var(--txt);
+  border:1px solid var(--line2);border-radius:4px;padding:7px 9px;outline:none;
+}
+input:focus,select:focus,textarea:focus{border-color:var(--acc)}
+textarea{resize:vertical;line-height:1.5}
+label{display:block;margin:10px 0 0;color:var(--dim);font-size:11px;letter-spacing:.4px}
+label > span{display:block;margin-bottom:5px;text-transform:uppercase;letter-spacing:1.1px;font-size:10px}
+
+.prog-list{display:flex;flex-direction:column;gap:5px}
+.prog{
+  text-align:left;width:100%;border:1px solid transparent;background:var(--panel);
+  padding:8px 10px;border-radius:5px;display:grid;gap:1px;
+}
+.prog:hover{border-color:var(--line2);background:var(--panel2)}
+.prog.active{border-color:var(--acc);background:#0e1c18}
+.prog b{font-size:12.5px}
+.prog small{color:var(--dim);font-size:10.5px}
+
+.tools{display:flex;flex-direction:column;gap:3px;font-size:11px}
+.tool{display:flex;justify-content:space-between;gap:8px;padding:3px 5px;border-radius:3px;cursor:help}
+.tool:hover{background:var(--panel)}
+.tool .ok{color:var(--acc)}
+.tool .no{color:#7a4d58}
+.tool small{color:var(--dim)}
+
+.model-box{display:flex;flex-direction:column;gap:7px}
+.model-box label{margin:0}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:16px}
+.card h2{font-size:12px;margin:0 0 14px;color:var(--acc);text-transform:uppercase;letter-spacing:1.7px;
+  display:flex;align-items:center;gap:10px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
+.chk{display:flex;align-items:center;gap:6px;margin:0;color:var(--txt);font-size:12px;text-transform:none;letter-spacing:0}
+.chk input{width:auto}
+.msg{color:var(--dim);font-size:11.5px}
+.msg.err{color:var(--crit)}
+.pill{background:var(--line);border-radius:20px;padding:1px 8px;font-size:10.5px;color:var(--dim);letter-spacing:0}
+
+.log{
+  background:#060910;border:1px solid var(--line);border-radius:5px;
+  padding:12px;height:230px;overflow:auto;font-size:11.5px;color:#9fb0c8;
+  white-space:pre-wrap;word-break:break-word;margin:0;
+}
+.log .h{color:var(--acc)}
+.log .w{color:var(--med)}
+.log .e{color:var(--crit)}
+
+.finding{border-top:1px solid var(--line);padding:11px 0}
+.finding:first-child{border-top:0;padding-top:0}
+.f-top{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap}
+.f-title{font-size:13px;font-weight:600}
+.f-meta{color:var(--dim);font-size:11px;margin-top:2px}
+.sev{display:inline-block;padding:1px 7px;border-radius:3px;font-size:10px;
+  text-transform:uppercase;letter-spacing:.9px;font-weight:700;white-space:nowrap}
+.sev.critical{background:#3a1018;color:var(--crit)}
+.sev.high{background:#3a2110;color:var(--high)}
+.sev.medium{background:#3a3212;color:var(--med)}
+.sev.low{background:#10301f;color:var(--low)}
+.sev.info{background:#12233a;color:var(--info)}
+.conf{margin-top:8px;display:flex;align-items:center;gap:9px;font-size:11px;color:var(--dim)}
+.bar{flex:0 0 130px;height:4px;background:var(--line);border-radius:3px;overflow:hidden}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--acc2),var(--acc))}
+.f-why{margin-top:7px;font-size:12px;color:#aab6c9;border-left:2px solid var(--line2);padding-left:9px}
+.f-actions{display:flex;gap:6px;margin-top:8px}
+a{color:var(--acc2);text-decoration:none}
+a:hover{text-decoration:underline}
+iframe{width:100%;height:640px;border:1px solid var(--line);border-radius:6px;background:#fff;margin-top:12px}
+.empty{color:var(--dim);padding:40px 0;text-align:center;font-size:12.5px}
+.kbd{background:#0a0e15;border:1px solid var(--line2);border-radius:3px;padding:0 5px;font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span>Dragon</span>Eye<em>recon console</em></div>
+  <div class="hdr-right">
+    <span id="run-state" class="msg"></span>
+    <span id="dot" class="dot"></span>
+    <span id="version"></span>
+  </div>
+</header>
+
+<div class="app">
+  <aside>
+    <div class="side-h">Programs <button class="mini" id="btn-new">+ new</button></div>
+    <div id="program-list" class="prog-list"></div>
+
+    <div class="side-h">Tools</div>
+    <div id="tool-list" class="tools"></div>
+
+    <div class="side-h">Model</div>
+    <div class="model-box">
+      <label><span>provider</span><select id="provider"></select></label>
+      <label><span>model</span>
+        <input id="model" list="model-list" placeholder="model id" autocomplete="off">
+        <datalist id="model-list"></datalist>
+      </label>
+      <label><span>usage</span>
+        <select id="usage">
+          <option value="off">off - no model calls</option>
+          <option value="low">low - top 10, 1.2k evidence</option>
+          <option value="balanced">balanced - top 50, 4k evidence</option>
+          <option value="high">high - top 500, 12k evidence</option>
+        </select>
+      </label>
+      <label><span>api key (new)</span>
+        <input id="api-key" type="password" placeholder="leave blank to keep" autocomplete="off">
+      </label>
+      <button class="mini wide" id="btn-save-model">save model settings</button>
+      <div class="msg" id="model-msg"></div>
+    </div>
+  </aside>
+
+  <main>
+    <section id="view-empty" class="card">
+      <h2>Welcome</h2>
+      <p class="msg">Select a program on the left, or create one.</p>
+      <p class="msg">Scope rules: <span class="kbd">example.com</span> apex+subdomains,
+        <span class="kbd">*.example.com</span> subdomains only,
+        <span class="kbd">10.0.0.0/8</span> CIDR,
+        <span class="kbd">re:^api\d+\.</span> regex,
+        <span class="kbd">AS15169</span> ASN.
+        Out-of-scope always wins.</p>
+      <p class="msg">Nothing leaves this machine except the traffic your tools send to
+        in-scope targets. Use <span class="kbd">dry run</span> first.</p>
+    </section>
+
+    <section id="view-program" class="hidden">
+      <div class="card">
+        <h2>Program <span class="pill" id="prog-id"></span></h2>
+        <div class="grid2">
+          <label><span>name</span><input id="p-name" placeholder="acme"></label>
+          <label><span>platform</span>
+            <select id="p-platform">
+              <option value="">-</option><option>hackerone</option><option>bugcrowd</option>
+              <option>intigriti</option><option>yeswehack</option><option>other</option>
+            </select>
+          </label>
+        </div>
+        <label><span>in scope - one rule per line</span>
+          <textarea id="p-in" rows="6" placeholder="acme.com&#10;*.acme.com&#10;203.0.113.0/24"></textarea>
+        </label>
+        <label><span>out of scope</span>
+          <textarea id="p-out" rows="4" placeholder="blog.acme.com&#10;status.acme.com"></textarea>
+        </label>
+        <label><span>policy note / program url</span>
+          <input id="p-note" placeholder="https://hackerone.com/acme - policy snapshot date">
+        </label>
+        <div class="row">
+          <button class="primary" id="btn-save-program">save program</button>
+          <button class="danger" id="btn-delete">delete</button>
+          <span class="msg" id="prog-msg"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Launch recon</h2>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="opt-dry"> dry run (print commands)</label>
+          <label class="chk"><input type="checkbox" id="opt-passive"> passive only</label>
+        </div>
+        <div class="row">
+          <button class="primary" id="btn-run">start run</button>
+          <button id="btn-resume" class="hidden">resume last run</button>
+          <span class="msg" id="run-msg"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Live output <button class="mini" id="btn-clear">clear</button></h2>
+        <pre class="log" id="log"></pre>
+      </div>
+
+      <div class="card">
+        <h2>Findings <span class="pill" id="finding-count">0</span></h2>
+        <div id="findings"><div class="empty">No run selected.</div></div>
+      </div>
+
+      <div class="card hidden" id="report-card">
+        <h2>Report</h2>
+        <div class="row">
+          <a id="link-html" href="#" target="_blank">open HTML</a>
+          <a id="link-md" href="#" target="_blank">markdown</a>
+          <a id="link-json" href="#" target="_blank">json</a>
+          <button class="mini" id="btn-toggle-report">show preview</button>
+        </div>
+        <iframe id="report-frame" class="hidden" title="report"></iframe>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let TOKEN = "";
+const STATE = { programs: [], current: null, run: null, es: null, lastRunId: null, providers: [] };
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (opts.body) headers["Content-Type"] = "application/json";
+  if (opts.method && opts.method !== "GET") headers["X-DragonEye-Token"] = TOKEN;
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (!res.ok) {
+    let detail = res.status + " " + res.statusText;
+    try { const body = await res.json(); detail = body.detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  const type = res.headers.get("content-type") || "";
+  return type.includes("json") ? res.json() : res.text();
+}
+
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+function setState(state, text) {
+  const dot = $("dot");
+  dot.className = "dot" + (state === "busy" ? " busy" : state === "err" ? " err" : "");
+  $("run-state").textContent = text || "";
+}
+
+/* ---------- boot ---------- */
+async function boot() {
+  try {
+    const session = await api("/api/session");
+    TOKEN = session.token;
+    $("version").textContent = "v" + session.version;
+    await Promise.all([loadTools(), loadModels(), loadConfig()]);
+    await loadPrograms();
+    bind();
+  } catch (err) {
+    setState("err", "offline");
+    $("view-empty").innerHTML = '<h2>Backend unreachable</h2><p class="msg">' + esc(err.message) + "</p>";
+  }
+}
+
+/* ---------- programs ---------- */
+async function loadPrograms() {
+  const data = await api("/api/programs");
+  STATE.programs = data.programs || [];
+  const list = $("program-list");
+  if (!STATE.programs.length) {
+    list.innerHTML = '<div class="msg">No programs yet.</div>';
+    return;
+  }
+  list.innerHTML = STATE.programs.map((p) => `
+    <button class="prog ${STATE.current && STATE.current.id === p.id ? "active" : ""}" data-id="${p.id}">
+      <b>${esc(p.name)}</b>
+      <small>${esc(p.platform || "no platform")} · ${p.asset_count || 0} assets</small>
+    </button>`).join("");
+  list.querySelectorAll(".prog").forEach((el) => {
+    el.addEventListener("click", () => openProgram(Number(el.dataset.id)));
+  });
+}
+
+async function openProgram(id) {
+  closeStream();
+  if (id === null) {
+    STATE.current = null;
+    $("view-empty").classList.add("hidden");
+    $("view-program").classList.remove("hidden");
+    $("prog-id").textContent = "new";
+    $("p-name").value = "";
+    $("p-platform").value = "";
+    $("p-in").value = "";
+    $("p-out").value = "";
+    $("p-note").value = "";
+    $("prog-msg").textContent = "";
+    $("findings").innerHTML = '<div class="empty">Save the program, then start a run.</div>';
+    $("log").textContent = "";
+    $("report-card").classList.add("hidden");
+    $("btn-resume").classList.add("hidden");
+    $("btn-delete").classList.add("hidden");
+    await loadPrograms();
+    return;
+  }
+
+  const program = await api("/api/programs/" + id);
+  STATE.current = program;
+  $("view-empty").classList.add("hidden");
+  $("view-program").classList.remove("hidden");
+  $("prog-id").textContent = "#" + program.id;
+  $("p-name").value = program.name || "";
+  $("p-platform").value = program.platform || "";
+  $("p-in").value = (program.in_scope || []).join("\n");
+  $("p-out").value = (program.out_of_scope || []).join("\n");
+  $("p-note").value = program.policy_note || "";
+  $("prog-msg").textContent = "";
+  $("btn-delete").classList.remove("hidden");
+  $("log").textContent = "";
+  $("report-card").classList.add("hidden");
+  $("findings").innerHTML = '<div class="empty">Loading latest run…</div>';
+
+  await loadPrograms();
+  const runs = program.runs || [];
+  if (runs.length) {
+    STATE.lastRunId = runs[0].id;
+    $("btn-resume").classList.toggle("hidden", runs[0].status === "done");
+    await loadRun(runs[0].id);
+  } else {
+    STATE.lastRunId = null;
+    $("btn-resume").classList.add("hidden");
+    $("findings").innerHTML = '<div class="empty">No runs yet.</div>';
+  }
+}
+
+async function saveProgram() {
+  const name = $("p-name").value.trim();
+  if (!name) { $("prog-msg").textContent = "name required"; $("prog-msg").className = "msg err"; return; }
+  const payload = {
+    name,
+    in_scope: $("p-in").value,
+    out_of_scope: $("p-out").value,
+    platform: $("p-platform").value || null,
+    note: $("p-note").value || null,
+  };
+  try {
+    const data = await api("/api/programs", { method: "POST", body: JSON.stringify(payload) });
+    $("prog-msg").textContent = "saved";
+    $("prog-msg").className = "msg";
+    STATE.current = data.program;
+    await openProgram(data.program.id);
+  } catch (err) {
+    $("prog-msg").textContent = err.message;
+    $("prog-msg").className = "msg err";
+  }
+}
+
+async function deleteProgram() {
+  if (!STATE.current) return;
+  if (!confirm("Delete " + STATE.current.name + " and all of its runs?")) return;
+  await api("/api/programs/" + STATE.current.id, { method: "DELETE" });
+  STATE.current = null;
+  $("view-program").classList.add("hidden");
+  $("view-empty").classList.remove("hidden");
+  await loadPrograms();
+}
+
+/* ---------- runs ---------- */
+async function startRun() {
+  if (!STATE.current) { $("run-msg").textContent = "save the program first"; return; }
+  closeStream();
+  $("log").textContent = "";
+  $("findings").innerHTML = '<div class="empty">Running…</div>';
+  $("report-card").classList.add("hidden");
+  $("btn-run").disabled = true;
+  $("run-msg").textContent = "starting…";
+  setState("busy", "running");
+  try {
+    const data = await api("/api/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        program_id: STATE.current.id,
+        dry_run: $("opt-dry").checked,
+        passive: $("opt-passive").checked,
+        usage: $("usage").value,
+        provider: $("provider").value || null,
+        model: $("model").value.trim() || null,
+      }),
+    });
+    STATE.lastRunId = data.run_id;
+    $("run-msg").textContent = "run " + data.run_id;
+    tailLog(data.run_id);
+  } catch (err) {
+    $("run-msg").textContent = err.message;
+    setState("err", "failed");
+    $("btn-run").disabled = false;
+  }
+}
+
+async function resumeRun() {
+  if (!STATE.lastRunId) return;
+  try {
+    await api("/api/runs/" + STATE.lastRunId + "/resume", { method: "POST" });
+    tailLog(STATE.lastRunId);
+  } catch (err) {
+    $("run-msg").textContent = err.message;
+  }
+}
+
+function tailLog(runId) {
+  closeStream();
+  setState("busy", "running " + runId);
+  const es = new EventSource("/api/runs/" + runId + "/events");
+  STATE.es = es;
+  es.onmessage = (event) => appendLog(JSON.parse(event.data));
+  es.addEventListener("done", async () => {
+    closeStream();
+    setState("", "finished");
+    $("btn-run").disabled = false;
+    await loadRun(runId);
+  });
+  es.onerror = () => {
+    closeStream();
+    $("btn-run").disabled = false;
+    setState("err", "log stream lost");
+  };
+}
+
+function closeStream() {
+  if (STATE.es) { STATE.es.close(); STATE.es = null; }
+}
+
+function appendLog(line) {
+  const log = $("log");
+  const cls = line.includes("!!") ? "e" : line.includes("! ") ? "w" : line.includes("+ ") ? "h" : "";
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = line + "\n";
+  log.appendChild(span);
+  while (log.childNodes.length > 2000) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function loadRun(runId) {
+  try {
+    const data = await api("/api/runs/" + runId);
+    STATE.run = data;
+    renderFindings(data.findings || []);
+    renderReport(runId);
+    const status = (data.run && data.run.status) || "unknown";
+    if (status !== "done") {
+      $("btn-resume").classList.remove("hidden");
+      setState(data.active ? "busy" : "err", data.active ? "running" : status);
+    } else {
+      $("btn-resume").classList.add("hidden");
+      setState("", "done · " + ((data.run.stats || {}).duration_seconds || 0) + "s");
+    }
+    $("finding-count").textContent = (data.findings || []).length;
+  } catch (err) {
+    $("findings").innerHTML = '<div class="empty">' + esc(err.message) + "</div>";
+  }
+}
+
+/* ---------- findings ---------- */
+function renderFindings(findings) {
+  const box = $("findings");
+  if (!findings.length) {
+    box.innerHTML = '<div class="empty">No findings recorded for this run.</div>';
+    return;
+  }
+  box.innerHTML = findings.map((f) => {
+    const sev = (f.severity || "info").toLowerCase();
+    const conf = f.confidence == null ? null : Number(f.confidence);
+    const band = f.band ? " (" + esc(f.band) + ")" : "";
+    const bar = conf == null ? "" : `
+      <div class="conf">
+        <div class="bar"><i style="width:${Math.max(2, Math.min(100, conf))}%"></i></div>
+        <span>${conf}%${band}</span>
+        <span>${esc(f.verdict || "")}</span>
+      </div>`;
+    const why = f.reasoning ? '<div class="f-why">' + esc(f.reasoning) + "</div>" : "";
+    const next = f.next_step ? '<div class="f-meta">next: ' + esc(f.next_step) + "</div>" : "";
+    return `
+      <div class="finding">
+        <div class="f-top">
+          <span class="sev ${esc(sev)}">${esc(sev)}</span>
+          <span class="f-title">${esc(f.title || f.template_id || "finding")}</span>
+          ${f.is_new ? '<span class="pill">new</span>' : ""}
+        </div>
+        <div class="f-meta">${esc(f.asset_value || "?")} · ${esc(f.tool || "")}/${esc(f.template_id || "")} · id ${f.id}</div>
+        ${bar}${why}${next}
+        <div class="f-actions">
+          <button class="mini" data-fid="${f.id}" data-val="confirmed">confirmed</button>
+          <button class="mini" data-fid="${f.id}" data-val="false-positive">false positive</button>
+        </div>
+      </div>`;
+  }).join("");
+
+  box.querySelectorAll("button[data-fid]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await api("/api/findings/" + btn.dataset.fid + "/validation", {
+          method: "POST",
+          body: JSON.stringify({ validated: btn.dataset.val }),
+        });
+        btn.textContent = "saved ✓";
+        btn.disabled = true;
+      } catch (err) { btn.textContent = "error"; }
+    });
+  });
+}
+
+function renderReport(runId) {
+  $("report-card").classList.remove("hidden");
+  $("link-html").href = "/api/runs/" + runId + "/report?format=html";
+  $("link-md").href = "/api/runs/" + runId + "/report?format=md";
+  $("link-json").href = "/api/runs/" + runId + "/report?format=json";
+  $("report-frame").classList.add("hidden");
+  $("btn-toggle-report").textContent = "show preview";
+}
+
+/* ---------- meta ---------- */
+async function loadTools() {
+  try {
+    const data = await api("/api/tools");
+    $("tool-list").innerHTML = (data.tools || []).map((t) => `
+      <div class="tool" title="${esc(t.installed ? (t.version || "") : (t.install_hint || ""))}">
+        <span class="${t.installed ? "ok" : "no"}">${t.installed ? "●" : "○"} ${esc(t.name)}</span>
+        <small>${t.passive ? "passive" : "active"}</small>
+      </div>`).join("");
+  } catch (err) {
+    $("tool-list").innerHTML = '<div class="msg err">' + esc(err.message) + "</div>";
+  }
+}
+
+async function loadModels() {
+  const data = await api("/api/models");
+  STATE.providers = data.providers || [];
+  $("provider").innerHTML = STATE.providers.map((p) => {
+    const label = p.label + (p.local ? " · local" : "");
+    return `<option value="${esc(p.id)}">${esc(label)}</option>`;
+  }).join("");
+  renderModelOptions();
+}
+
+function renderModelOptions() {
+  const provider = $("provider").value;
+  const entry = STATE.providers.find((p) => p.id === provider);
+  $("model-list").innerHTML = ((entry && entry.models) || []).map(
+    (m) => `<option value="${esc(m)}"></option>`
+  ).join("");
+  if (entry && entry.models && entry.models.length && !$("model").value) {
+    $("model").value = entry.models[0];
+  }
+}
+
+async function loadConfig() {
+  const data = await api("/api/config");
+  const cfg = data.config || {};
+  const llm = cfg.llm || {};
+  if (llm.provider) $("provider").value = llm.provider;
+  renderModelOptions();
+  if (llm.model) $("model").value = llm.model;
+  $("usage").value = llm.usage || "balanced";
+}
+
+async function saveModel() {
+  const payload = {
+    provider: $("provider").value,
+    model: $("model").value.trim(),
+    usage: $("usage").value,
+  };
+  const key = $("api-key").value.trim();
+  if (key) payload.api_key = key;
+  try {
+    await api("/api/config", { method: "POST", body: JSON.stringify(payload) });
+    $("api-key").value = "";
+    $("model-msg").textContent = "saved";
+    $("model-msg").className = "msg";
+  } catch (err) {
+    $("model-msg").textContent = err.message;
+    $("model-msg").className = "msg err";
+  }
+}
+
+/* ---------- wiring ---------- */
+function bind() {
+  $("btn-new").addEventListener("click", () => openProgram(null));
+  $("btn-save-program").addEventListener("click", saveProgram);
+  $("btn-delete").addEventListener("click", deleteProgram);
+  $("btn-run").addEventListener("click", startRun);
+  $("btn-resume").addEventListener("click", resumeRun);
+  $("btn-clear").addEventListener("click", () => { $("log").textContent = ""; });
+  $("provider").addEventListener("change", renderModelOptions);
+  $("btn-save-model").addEventListener("click", saveModel);
+  $("btn-toggle-report").addEventListener("click", () => {
+    const frame = $("report-frame");
+    if (frame.classList.contains("hidden")) {
+      frame.src = $("link-html").href;
+      frame.classList.remove("hidden");
+      $("btn-toggle-report").textContent = "hide preview";
+    } else {
+      frame.classList.add("hidden");
+      $("btn-toggle-report").textContent = "show preview";
+    }
+  });
+}
+
+boot();
+</script>
+</body>
+</html>

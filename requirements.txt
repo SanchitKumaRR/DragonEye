@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# DragonEye - Python runtime dependencies
+# ---------------------------------------------------------------------------
+# Install into a venv:
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#   .venv/bin/pip install -e .
+# ---------------------------------------------------------------------------
+typer>=0.12
+rich>=13.7
+httpx>=0.27
+fastapi>=0.110
+uvicorn>=0.29
+
+
+# ---------------------------------------------------------------------------
+# SYSTEM TOOLS (not pip packages - external binaries DragonEye shells out to)
+# ---------------------------------------------------------------------------
+# DragonEye never installs these for you. It detects them at runtime and marks
+# the matching pipeline stage "missing" with the hint below.
+#
+# Arch (AUR helpers vary - adjust as needed):
+#   sudo pacman -S go nmap ripgrep
+#   go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+#   go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+#   go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+#   go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+#   go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+#   export PATH="$PATH:$(go env GOPATH)/bin"
+#
+# Debian/Ubuntu:
+#   sudo apt install golang-go nmap ripgrep
+#   (then the same `go install` lines, or the ProjectDiscovery apt repo)
+#
+# macOS:
+#   brew install go nmap ripgrep
+#   (then the same `go install` lines)
+#
+# Optional but recommended:
+#   ripgrep  - used for the LLM "search evidence" tool and faster log grep
+#   nmap     - reserved for the upcoming port/service adapter
+#
+# Verify what DragonEye can see:
+#   dragoneye tools
