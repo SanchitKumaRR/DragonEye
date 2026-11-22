@@ -23,6 +23,8 @@ APP_NAME = "dragoneye"
 DEFAULT_MODEL = "gpt-4o-mini"
 USAGE_LEVELS = ("off", "low", "balanced", "high")
 
+THEMES = ("normal", "awakened")
+
 
 def _xdg(env_var: str, fallback: str) -> Path:
     root = os.environ.get(env_var)
@@ -87,6 +89,7 @@ class Config:
     nuclei_severities: list[str] = field(
         default_factory=lambda: ["low", "medium", "high", "critical"]
     )
+    theme: str = "normal"  # "normal" (green) or "awakened" (red)
     user_agent: str = f"DragonEye/{__version__} (+https://github.com/SanchitKumaRR/DragonEye)"
     web_host: str = "127.0.0.1"
     web_port: int = 8765
@@ -127,6 +130,8 @@ def load_config() -> Config:
         cfg.request_rate = 25
     if not isinstance(cfg.nuclei_severities, list) or not cfg.nuclei_severities:
         cfg.nuclei_severities = ["low", "medium", "high", "critical"]
+    if cfg.theme not in THEMES:
+        cfg.theme = "normal"
     return cfg
 
 

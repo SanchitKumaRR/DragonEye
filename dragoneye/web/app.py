@@ -36,6 +36,7 @@ from ..llm.providers import all_models, get_provider, provider_list
 from ..pipeline import pipeline_summary, start_run
 from ..scope import Scope, ScopeError
 from ..tools import status as tool_status
+from ..tools.adapters import ADAPTERS
 
 STATIC = Path(__file__).parent / "static"
 CSRF_TOKEN = secrets.token_urlsafe(24)
@@ -380,6 +381,19 @@ def validate_finding(
 @app.get("/api/tools")
 def tools() -> dict[str, Any]:
     return {"tools": tool_status(with_version=True)}
+
+
+@app.post("/api/tools/install")
+def install_tool(payload: dict) -> dict[str, Any]:
+    name = payload.get("name", "")
+    if not name:
+        raise HTTPException(400, "no tool name")
+    tool = next((t for t in ADAPTERS if t.spec.name == name), None)
+    if not tool:
+        raise HTTPException(404, f"unknown tool {name!r}")
+    if tool.spec.installed:
+        return {"ok": True, "installed": True, "version": tool.spec.version}
+    return {"ok": False, "hint": tool.spec.install_hint, "installed": False}
 
 
 @app.get("/api/models")

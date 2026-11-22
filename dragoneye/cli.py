@@ -28,6 +28,7 @@ from .config import (
 )
 from .llm.providers import all_models, get_provider
 from .pipeline import pipeline_summary, start_run
+from .llm.client import LLMClient
 from .scope import Scope, ScopeError
 from .tools import status as tool_status
 
@@ -123,7 +124,7 @@ def init() -> None:
     cfg = load_config()
     save_config(cfg)
     console.print(Panel.fit(
-        f"[bold green]DragonEye {__version__} initialised[/bold green]\n\n"
+        f"[bold green]DragonEye {__version__} initialised[/bold red]\n\n"
         f"config : {config_path()}\n"
         f"data   : {data_dir()}\n"
         f"db     : {db_path()}\n\n"
@@ -450,6 +451,120 @@ def audit(
 
 
 @app.command()
+def awaken() -> None:
+    """Awaken DragonEye (switch theme to red and enable AI chatbot mode)."""
+    cfg = load_config()
+    if cfg.theme == "awakened":
+        console.print("[yellow]DragonEye is already awakened.[/yellow]")
+    else:
+        cfg.theme = "awakened"
+        save_config(cfg)
+        _banner()
+        console.print("[bold red]DragonEye awakened![/bold red]")
+        console.print("Theme switched to bright red. Proceed with caution.")
+    # Select provider ONCE at the start
+    from dragoneye.llm import provider_list
+    providers = provider_list()
+    print("Available providers:")
+    for i, p in enumerate(providers, 1):
+        print("  " + str(i) + ". " + p['label'] + " (" + p['id'] + ") - Models: " + ", ".join(p['models'][:2]))
+    provider_choice = typer.prompt("Select provider number", default=str(len(providers)))
+    try:
+        provider_idx = int(provider_choice) - 1
+        if provider_idx < 0 or provider_idx >= len(providers):
+            provider_idx = 0
+    except ValueError:
+        provider_idx = 0
+    provider_id = providers[provider_idx]['id']
+    # Select model ONCE at the start
+    available_models = providers[provider_idx]['models']
+    print("Available models:")
+    for i, model in enumerate(available_models, 1):
+        print("  " + str(i) + ". " + model)
+    model_choice = typer.prompt("Select model number (or type model name)")
+    try:
+        model_idx = int(model_choice) - 1
+        if 0 <= model_idx < len(available_models):
+            selected_model = available_models[model_idx]
+        else:
+            selected_model = available_models[0]
+    except ValueError:
+        if model_choice in available_models:
+            selected_model = model_choice
+        else:
+            selected_model = available_models[0]
+    # Chatbot loop in awakened mode
+    while cfg.theme == "awakened":
+        # Ask for task
+        task = typer.prompt("What task would you like DragonEye to perform? (type 'slumber' to exit awakened mode)")
+        if task.lower() == 'slumber':
+            cfg.theme = "normal"
+            save_config(cfg)
+            _banner()
+            console.print("[bold green]DragonEye slumbered![/bold green]")
+            console.print("Theme returned to normal (green).")
+            break
+        if not task:
+            console.print("[red]No task specified.[/red]")
+            continue
+        console.print("[italic]Processing task: " + task + "[/italic]")
+        # Process task with AI model
+        try:
+            client = LLMClient(provider_id, selected_model)
+            part1 = "The user wants you to: " + task + "\n\n"
+            part2 = "Please output ONLY the shell commands you would run to accomplish this task. "
+            part3 = "You CAN use sudo. Just output the commands, one per line, without any explanation "
+            part4 = "or conversational text. Be concise and direct."
+            prompt_text = part1 + part2 + part3 + part4
+            response = client.chat(messages=[{"role": "user", "content": prompt_text}],
+                temperature=0.7,
+                max_tokens=500)
+            if response and hasattr(response, 'text') and response.text:
+                console.print("\n[bold]AI commands:[/bold]")
+                commands = response.text.strip().split("\n")
+                for i, cmd in enumerate(commands, 1):
+                    cmd = cmd.strip()
+                    if cmd and not cmd.startswith("#"):
+                        console.print(" " + str(i) + ". [bold cyan]" + cmd + "[/bold cyan]")
+                console.print("\n[bold]Execute these commands?[/bold] (y/n)")
+                if typer.confirm("", default=False):
+                    import subprocess
+                    # JOIN commands into a single command string if there are multiple,
+                    # otherwise run the single command
+                    if len(commands) == 1:
+                        cmd = commands[0].strip()
+                    else:
+                        cmd = "\n".join(c.strip() for c in commands if c.strip())
+                    result = subprocess.run(
+                        cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=30)
+                    console.print("[stdout]" + result.stdout[-100:])
+                    console.print("[stderr]" + result.stderr[-100:])
+                    console.print("[exit code]" + str(result.returncode))
+            else:
+                console.print("[red]No response from AI model.[/red]")
+        except Exception as e:
+            console.print("[red]Error processing task: " + str(e) + "[/red]")
+    # Loop ended - return to normal theme
+    if cfg.theme == "normal":
+        _banner()
+        console.print("\n[green]Returning to normal mode.[/green]")
+@app.command()
+def slumber() -> None:
+    """Put DragonEye to slumber (return to normal theme)."""
+    cfg = load_config()
+    if cfg.theme == "normal":
+        console.print("[yellow]DragonEye is already in normal state.[/yellow]")
+        return
+    cfg.theme = "normal"
+    save_config(cfg)
+    _banner()
+    console.print("[bold green]DragonEye slumbered![/bold green]")
+    console.print("Theme returned to normal (green).")
+@app.command()
 def serve(
     host: str | None = typer.Option(None, "--host"),
     port: int | None = typer.Option(None, "--port"),
@@ -478,7 +593,7 @@ def serve(
         )
     url = f"http://{host}:{port}"
     console.print(Panel.fit(
-        f"[bold green]DragonEye GUI[/bold green]\n{url}\n\n"
+        f"[bold green]DragonEye GUI[/bold red]\n{url}\n\n"
         "ctrl-c to stop",
         title="serve",
     ))

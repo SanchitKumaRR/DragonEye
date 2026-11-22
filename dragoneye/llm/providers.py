@@ -30,7 +30,7 @@ PROVIDERS: dict[str, Provider] = {
     "openai": Provider(
         "openai", "OpenAI", "https://api.openai.com/v1", "bearer",
         ("gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
-         "o3", "o4-mini", "o1-mini", "gpt-4-turbo"),
+         "o3", "o4-mini", "o1-mini", "gpt-4-turbo", "openai/gpt-oss-120b"),
         env="OPENAI_API_KEY",
     ),
     "anthropic": Provider(
@@ -53,7 +53,7 @@ PROVIDERS: dict[str, Provider] = {
     "groq": Provider(
         "groq", "Groq", "https://api.groq.com/openai/v1", "bearer",
         ("llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b",
-         "mixtral-8x7b-32768", "gemma2-9b-it", "deepseek-r1-distill-llama-70b"),
+         "mixtral-8x7b-32768", "gemma2-9b-it", "deepseek-r1-distill-llama-70b", "openai/gpt-oss-120b"),
         env="GROQ_API_KEY",
     ),
     "mistral": Provider(
