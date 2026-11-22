@@ -493,10 +493,18 @@ def awaken() -> None:
             selected_model = model_choice
         else:
             selected_model = available_models[0]
+    # Persistent conversation context
+    context = []  # List of (task, result_summary) tuples
     # Chatbot loop in awakened mode
     while cfg.theme == "awakened":
+        # Build context prompt from previous tasks
+        context_prompt = ""
+        if context:
+            context_prompt = "\n\nPrevious task results:"
+            for i, (prev_task, prev_result_summary) in enumerate(context[-3:], 1):
+                context_prompt += f"\n\nTask {i}: {prev_task}\nResult: {prev_result_summary}"
         # Ask for task
-        task = typer.prompt("What task would you like DragonEye to perform? (type 'slumber' to exit awakened mode)")
+        task = typer.prompt("What task would you like DragonEye to perform? (type 'slumber' to exit awakened mode" + context_prompt + ")")
         if task.lower() == 'slumber':
             cfg.theme = "normal"
             save_config(cfg)
@@ -515,7 +523,15 @@ def awaken() -> None:
             part2 = "Please output ONLY the shell commands you would run to accomplish this task. "
             part3 = "You CAN use sudo. Just output the commands, one per line, without any explanation "
             part4 = "or conversational text. Be concise and direct."
-            prompt_text = part1 + part2 + part3 + part4
+            # Format context for inclusion in prompt
+            context_str = ""
+            if context:
+                context_str = "\n\nPrevious task results:\n"
+                for i, (prev_task, prev_result) in enumerate(context[-3:], 1):
+                    # Truncate long results for prompt inclusion
+                    result_summary = prev_result[:100] + "..." if len(prev_result) > 100 else prev_result
+                    context_str += f"\n\nTask {i}: {prev_task}\nResult: {result_summary}\n"
+            prompt_text = part1 + part2 + part3 + part4 + context_str
             response = client.chat(messages=[{"role": "user", "content": prompt_text}],
                 temperature=0.7,
                 max_tokens=500)
@@ -529,8 +545,6 @@ def awaken() -> None:
                 console.print("\n[bold]Execute these commands?[/bold] (y/n)")
                 if typer.confirm("", default=False):
                     import subprocess
-                    # JOIN commands into a single command string if there are multiple,
-                    # otherwise run the single command
                     if len(commands) == 1:
                         cmd = commands[0].strip()
                     else:
@@ -541,6 +555,12 @@ def awaken() -> None:
                         capture_output=True,
                         text=True,
                         timeout=30)
+                    result_output = result.stdout[-100:] + "\n" + result.stderr[-100:]
+                    # Store in context - summary of what happened
+                    result_summary = f"Executed: {cmd[:50]}{'...' if len(cmd) > 50 else ''}\nOutput: {result_output[-50:]}"
+                    context.append((task, result_summary))
+                    if len(context) > 10:
+                        context = context[-10:]
                     console.print("[stdout]" + result.stdout[-100:])
                     console.print("[stderr]" + result.stderr[-100:])
                     console.print("[exit code]" + str(result.returncode))
