@@ -539,7 +539,7 @@ def awaken() -> None:
                 {"role": "user", "content": prompt_text}
             ],
                 temperature=0.7,
-                max_tokens=500)
+            )
             if response and hasattr(response, 'text') and response.text:
                 console.print("\n[bold]AI commands:[/bold]")
                 commands = response.text.strip().split("\n")
