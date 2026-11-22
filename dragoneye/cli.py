@@ -523,15 +523,17 @@ def awaken() -> None:
             part2 = "Please output ONLY the shell commands you would run to accomplish this task. "
             part3 = "You CAN use sudo. Just output the commands, one per line, without any explanation "
             part4 = "or conversational text. Be concise and direct."
-            # Format context for inclusion in prompt
-            context_str = ""
+            # Build JSON context for AI model (internal use, not user-cluttered)
+            ai_context = []
             if context:
-                context_str = "\n\nPrevious task results:\n"
-                for i, (prev_task, prev_result) in enumerate(context[-3:], 1):
-                    # Truncate long results for prompt inclusion
-                    result_summary = prev_result[:100] + "..." if len(prev_result) > 100 else prev_result
-                    context_str += f"\n\nTask {i}: {prev_task}\nResult: {result_summary}\n"
-            prompt_text = part1 + part2 + part3 + part4 + context_str
+                for prev_task, prev_result in context[-3:]:
+                    result_summary = prev_result[:200] + "..." if len(prev_result) > 200 else prev_result
+                    ai_context.append({
+                        "user_input": prev_task,
+                        "model_output": result_summary
+                    })
+            context_json = json.dumps(ai_context, indent=2) if ai_context else ""
+            prompt_text = part1 + part2 + part3 + part4 + "\n\n" + context_json
             response = client.chat(messages=[{"role": "user", "content": prompt_text}],
                 temperature=0.7,
                 max_tokens=500)
