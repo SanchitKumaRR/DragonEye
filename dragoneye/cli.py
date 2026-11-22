@@ -534,7 +534,10 @@ def awaken() -> None:
                     })
             context_json = json.dumps(ai_context, indent=2) if ai_context else ""
             prompt_text = part1 + part2 + part3 + part4 + "\n\n" + context_json
-            response = client.chat(messages=[{"role": "user", "content": prompt_text}],
+            response = client.chat(messages=[
+                {"role": "system", "content": "You are a shell command executor. You MUST output ONLY the commands to run, one per line, without any explanation, commentary, or conversational text. You CAN use sudo. Be concise and direct. Your outputs will be executed on a Linux system."},
+                {"role": "user", "content": prompt_text}
+            ],
                 temperature=0.7,
                 max_tokens=500)
             if response and hasattr(response, 'text') and response.text:
