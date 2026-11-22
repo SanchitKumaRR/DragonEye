@@ -98,6 +98,8 @@ while read -r url; do
       printf '{"template-id":"tech-detect","info":{"name":"Nginx Detect","severity":"info"},"host":"%s","matched-at":"%s","matcher-name":"word"}\\n' "$url" "$url" >> "$out" ;;
   esac
 done < "$in"
+# A scanner finding on a host the scope engine never approved must be dropped.
+printf '{"template-id":"out-of-scope","info":{"name":"Out Of Scope Finding","severity":"critical"},"host":"outsider.evil.example","matched-at":"https://outsider.evil.example/x"}\\n' >> "$out"
 """
 
 
@@ -155,6 +157,7 @@ def test_full_run_with_fake_tools(fake_tools):
     assert len(findings) == 4
     titles = {f["title"] for f in findings}
     assert "Exposed Admin Panel" in titles
+    assert "Out Of Scope Finding" not in titles
     high = [f for f in findings if f["severity"] == "high"]
     assert len(high) == 2
     assert any(f["asset_value"] == "https://sub.acme.example/admin" for f in high)
@@ -163,6 +166,12 @@ def test_full_run_with_fake_tools(fake_tools):
 
     stats = result["stats"]
     assert stats["skipped_scope"] >= 2
+    assert stats["scope_rejections"] >= 2
+
+    audit_actions = {row["action"] for row in db.run_audit(con, result["id"])}
+    assert {"run_start", "scope_loaded", "scope_reject", "run_finish", "scope_summary"} <= audit_actions
+    rejected = db.run_audit(con, result["id"], "scope_reject")
+    assert any("outsider.evil.example" in (row["detail"] or "") for row in rejected)
 
     reports = result["report"]
     assert Path(reports["html"]).exists()
@@ -170,6 +179,8 @@ def test_full_run_with_fake_tools(fake_tools):
     assert "Exposed Admin Panel" in html
     assert "&amp;mdash;" not in html
     assert "Missing tools" not in html  # all five are present
+    assert "Scope rejections" in html
+    assert "outsider.evil.example" in html
 
     payload = json.loads(Path(reports["json"]).read_text())
     assert payload["run"]["status"] == "done"
@@ -258,8 +269,8 @@ class _MockLLM:
 
 
 def test_triage_with_mock_model_and_search_round(fake_tools):
-    from http.server import ThreadingHTTPServer
     import threading
+    from http.server import ThreadingHTTPServer
 
     con = fake_tools
     cfg = Config()
@@ -295,6 +306,9 @@ def test_triage_with_mock_model_and_search_round(fake_tools):
     assert all(v["confidence"] == 72 and v["band"] == "medium" for v in verdicts)
     assert summary["cost_usd"] == 0.0
     assert summary["tokens_in"] > 0
+    # Search and final-answer rounds are both billed and both accounted for.
+    assert summary["tokens_in"] == 120 * len(mock.calls)
+    assert summary["price_known"] is False
 
     # re-render so the report includes verdicts added after the run
     build_report(con, run["id"], Path(run["outdir"]))

@@ -16,7 +16,8 @@ from typing import Any
 
 from .. import db
 from .budgets import Budget, get_budget
-from .client import LLMClient, LLMError
+from .client import LLMClient, LLMError, LLMResponse
+from .providers import price_known
 
 SYSTEM_PROMPT = """You are a triage assistant inside a bug bounty recon pipeline.
 
@@ -72,6 +73,11 @@ def triage_run(ctx: Any, *, provider: str, model: str) -> dict[str, Any]:
         return {"skipped": len(ctx.findings), "reason": reason, "assessed": 0, "cost_usd": 0.0}
 
     max_cost = ctx.cfg.llm.max_cost_usd
+    if max_cost is not None and not price_known(client.model):
+        ctx.log(
+            "  ! triage: model is not in the local price table; "
+            f"max_cost_usd=${max_cost:.2f} cannot be enforced (tier budget still applies)"
+        )
     index = EvidenceIndex(ctx.raw_dir)
     candidates = _rank(ctx.findings)[: budget.review_limit]
     ctx.log(f"  · triage: {len(candidates)} finding(s) queued ({budget.describe()})")
@@ -79,22 +85,24 @@ def triage_run(ctx: Any, *, provider: str, model: str) -> dict[str, Any]:
     assessed = skipped = 0
     tokens_in = tokens_out = 0
     cost = 0.0
+    unpriced = False
 
     for finding in candidates:
         if max_cost is not None and cost >= max_cost:
             ctx.log(f"  ! triage: cost cap ${max_cost:.2f} reached, stopping")
             break
         try:
-            verdict, response = _assess(client, budget, finding, index)
+            verdict, usages = _assess(client, budget, finding, index)
         except (LLMError, ValueError) as exc:
             ctx.log(f"  ! triage: {finding.get('title')!r}: {exc}")
             skipped += 1
             continue
 
-        if response:
+        for response in usages:
             tokens_in += response.tokens_in
             tokens_out += response.tokens_out
             cost += response.cost_usd
+            unpriced = unpriced or not response.price_known
 
         if verdict is None:
             skipped += 1
@@ -113,9 +121,9 @@ def triage_run(ctx: Any, *, provider: str, model: str) -> dict[str, Any]:
             reasoning=str(verdict.get("reasoning") or "")[:2000],
             counter_evidence=str(verdict.get("counter_evidence") or "")[:1000],
             next_step=str(verdict.get("next_step") or "")[:500],
-            tokens_in=response.tokens_in if response else 0,
-            tokens_out=response.tokens_out if response else 0,
-            cost_usd=response.cost_usd if response else 0.0,
+            tokens_in=sum(r.tokens_in for r in usages),
+            tokens_out=sum(r.tokens_out for r in usages),
+            cost_usd=round(sum(r.cost_usd for r in usages), 8),
         )
         finding["verdict"] = verdict["verdict"]
         finding["confidence"] = verdict["confidence"]
@@ -136,6 +144,7 @@ def triage_run(ctx: Any, *, provider: str, model: str) -> dict[str, Any]:
             "cost_usd": round(float(llm_stats.get("cost_usd", 0.0)) + cost, 6),
             "assessed": assessed,
             "budget": budget.name,
+            "price_known": not unpriced,
         }
     )
     return {
@@ -145,13 +154,18 @@ def triage_run(ctx: Any, *, provider: str, model: str) -> dict[str, Any]:
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "budget": budget.name,
+        "price_known": not unpriced,
     }
 
 
 def _assess(
-    client: LLMClient, budget: Budget, finding: dict[str, Any], index: "EvidenceIndex"
-) -> tuple[dict[str, Any] | None, Any]:
-    """One finding -> verdict, allowing bounded local searches."""
+    client: LLMClient, budget: Budget, finding: dict[str, Any], index: EvidenceIndex
+) -> tuple[dict[str, Any] | None, list[LLMResponse]]:
+    """One finding -> verdict, allowing bounded local searches.
+
+    Every billable response (including search and repair rounds) is returned so
+    the caller's token/cost accounting matches what was actually spent.
+    """
     excerpt = _finding_evidence(finding, budget.evidence_chars, index)
     user = _prompt_for(finding, excerpt, budget)
     messages = [
@@ -159,7 +173,7 @@ def _assess(
         {"role": "user", "content": user},
     ]
 
-    last_response = None
+    usages: list[LLMResponse] = []
     for round_no in range(budget.max_search_rounds + 1):
         response = client.chat(
             messages,
@@ -167,7 +181,7 @@ def _assess(
             max_tokens=budget.max_output_tokens,
             json_mode=True,
         )
-        last_response = response
+        usages.append(response)
 
         try:
             data = _extract_json(response.text)
@@ -183,16 +197,13 @@ def _assess(
                 max_tokens=budget.max_output_tokens,
                 json_mode=True,
             )
-            last_response = response
-            try:
-                data = _extract_json(response.text)
-            except ValueError:
-                raise
+            usages.append(response)
+            data = _extract_json(response.text)
 
         if data.get("action") == "search":
             if round_no >= budget.max_search_rounds:
                 break
-            query = str(data.get("query") or "").strip()
+            query = str(data.get("query") or "").strip()[:200]
             if not query:
                 break
             hits = index.search(query, limit=budget.search_results)
@@ -212,9 +223,9 @@ def _assess(
         verdict = _normalise(data)
         if verdict is None:
             raise ValueError(f"model returned no usable verdict: {str(data)[:200]}")
-        return verdict, last_response
+        return verdict, usages
 
-    return None, last_response
+    return None, usages
 
 
 def _prompt_for(finding: dict[str, Any], excerpt: str, budget: Budget) -> str:
@@ -232,7 +243,7 @@ def _prompt_for(finding: dict[str, Any], excerpt: str, budget: Budget) -> str:
     )
 
 
-def _finding_evidence(finding: dict[str, Any], limit: int, index: "EvidenceIndex") -> str:
+def _finding_evidence(finding: dict[str, Any], limit: int, index: EvidenceIndex) -> str:
     path = finding.get("evidence_path")
     if not path:
         return ""
@@ -317,13 +328,14 @@ class EvidenceIndex:
     """Bounded local grep over raw tool output - the model's only 'tool'."""
 
     MAX_FILE_BYTES = 4_000_000
+    MAX_TOTAL_BYTES = 24_000_000
     TEXT_SUFFIXES = {".txt", ".json", ".jsonl", ".log", ".xml", ".html", ".csv"}
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
 
     def search(self, query: str, limit: int = 10) -> list[str]:
-        query = (query or "").strip()
+        query = (query or "").strip()[:200]
         if not query:
             return []
         try:
@@ -332,16 +344,19 @@ class EvidenceIndex:
             pattern = re.compile(re.escape(query), re.I)
 
         hits: list[str] = []
+        scanned = 0
         if not self.root.exists():
             return hits
         for path in sorted(self.root.rglob("*")):
-            if len(hits) >= limit:
+            if len(hits) >= limit or scanned >= self.MAX_TOTAL_BYTES:
                 break
             if not path.is_file() or path.suffix.lower() not in self.TEXT_SUFFIXES:
                 continue
             try:
-                if path.stat().st_size > self.MAX_FILE_BYTES:
+                size = path.stat().st_size
+                if size > self.MAX_FILE_BYTES:
                     continue
+                scanned += size
                 text = path.read_text(errors="replace")
             except OSError:
                 continue

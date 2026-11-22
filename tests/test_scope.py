@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dragoneye.scope import Rule, Scope, ScopeError, normalize_host, parse_rule
+from dragoneye.scope import Scope, ScopeError, normalize_host, parse_rule
 
 
 def scope(in_scope, out_scope=(), **kwargs):
@@ -75,10 +75,16 @@ def test_regex_rule():
     assert not rule.matches("www.example.com")
 
 
-def test_asn_rule():
-    rule = parse_rule("AS15169")
-    assert rule.matches("whatever.com", asn=15169)
-    assert not rule.matches("whatever.com", asn=1)
+def test_asn_rule_is_rejected_clearly():
+    with pytest.raises(ScopeError, match="ASN rules are not supported"):
+        parse_rule("AS15169")
+
+
+def test_bad_url_port_is_scope_error():
+    with pytest.raises(ScopeError):
+        parse_rule("https://example.com:notaport")
+    with pytest.raises(ScopeError):
+        normalize_host("https://example.com:99999")
 
 
 def test_url_rule_reduces_to_host():
@@ -144,7 +150,6 @@ def test_metadata_endpoint_always_blocked():
     s = scope(["169.254.169.254", "169.254.0.0/16"], allow_private=True)
     assert not s.in_scope("169.254.169.254")
 
-
 def test_private_blocked_by_default():
     s = scope(["10.0.0.0/8"])
     assert not s.in_scope("10.1.2.3")
@@ -182,3 +187,36 @@ def test_roots_only_domains():
 def test_roots_include_single_ips_but_not_cidrs():
     s = scope(["127.0.0.1", "10.0.0.0/8"])
     assert s.roots() == ["127.0.0.1"]
+
+
+# --- resolved hostnames ---------------------------------------------------
+
+
+def test_hostname_allowed_by_resolved_cidr():
+    s = scope(["10.10.0.0/16"], allow_private=True)
+    assert not s.in_scope("host.inside.example")
+    assert s.in_scope("host.inside.example", ["10.10.4.4"])
+    assert not s.in_scope("host.elsewhere.example", ["10.11.4.4"])
+
+
+def test_hostname_resolving_into_deny_cidr_is_denied():
+    s = scope(["example.com"], ["93.184.216.0/24"])
+    decision = s.check("www.example.com", ["93.184.216.34"])
+    assert not decision.allowed
+    assert "out-of-scope" in decision.reason
+
+
+def test_hostname_resolving_to_private_or_metadata_is_denied():
+    s = scope(["example.com"])
+    assert not s.check("www.example.com", ["10.0.0.5"]).allowed
+    assert not s.check("www.example.com", ["169.254.169.254"]).allowed
+
+
+def test_filter_accepts_resolved_map():
+    s = scope(["10.10.0.0/16"], allow_private=True)
+    allowed, rejected = s.filter(
+        ["a.example", "b.example"], resolved={"a.example": ["10.10.1.1"]}
+    )
+    assert allowed == ["a.example"]
+    assert len(rejected) == 1
+

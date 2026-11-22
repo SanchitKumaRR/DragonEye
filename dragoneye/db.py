@@ -9,15 +9,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from .config import db_path
 
-SCHEMA = """
-PRAGMA user_version = 1;
+SCHEMA_VERSION = 2
 
+SCHEMA = """
 CREATE TABLE IF NOT EXISTS programs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL UNIQUE,
@@ -140,11 +141,32 @@ CREATE INDEX IF NOT EXISTS idx_findings_program ON findings(program_id);
 CREATE INDEX IF NOT EXISTS idx_finding_runs_run ON finding_runs(run_id);
 CREATE INDEX IF NOT EXISTS idx_tool_runs_run    ON tool_runs(run_id);
 CREATE INDEX IF NOT EXISTS idx_audit_ts         ON audit(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_run        ON audit(run_id);
 """
 
 
 def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _ensure_schema(con: sqlite3.Connection) -> None:
+    """Create or migrate the schema.
+
+    Additive only: a v0.1 database (user_version=1) gains the audit index and
+    is stamped v2. A future database is refused rather than silently downgraded.
+    """
+    version = int(con.execute("PRAGMA user_version").fetchone()[0])
+    if version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database schema v{version} is newer than this DragonEye "
+            f"(v{SCHEMA_VERSION}); upgrade DragonEye"
+        )
+    if version == 0:
+        con.executescript(SCHEMA)
+    elif version < SCHEMA_VERSION:
+        con.execute("CREATE INDEX IF NOT EXISTS idx_audit_run ON audit(run_id)")
+    con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    con.commit()
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
@@ -154,7 +176,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
-    con.executescript(SCHEMA)
+    _ensure_schema(con)
     return con
 
 
@@ -373,6 +395,7 @@ def upsert_asset(
            ON CONFLICT(run_id, asset_id) DO UPDATE SET is_new = MAX(is_new, excluded.is_new)""",
         (run_id, asset_id, int(is_new)),
     )
+    con.commit()
     return asset_id, is_new
 
 
@@ -472,6 +495,7 @@ def upsert_finding(
            ON CONFLICT(run_id, finding_id) DO UPDATE SET is_new = MAX(is_new, excluded.is_new)""",
         (run_id, finding_id, int(is_new)),
     )
+    con.commit()
     return finding_id, is_new
 
 
@@ -609,3 +633,21 @@ def audit(con: sqlite3.Connection, action: str, detail: str = "", run_id: str | 
 
 def audit_log(con: sqlite3.Connection, limit: int = 100) -> list[dict[str, Any]]:
     return _rows(con.execute("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)).fetchall())
+
+
+def run_audit(
+    con: sqlite3.Connection,
+    run_id: str,
+    action: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    if action:
+        rows = con.execute(
+            "SELECT * FROM audit WHERE run_id = ? AND action = ? ORDER BY id LIMIT ?",
+            (run_id, action, limit),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT * FROM audit WHERE run_id = ? ORDER BY id LIMIT ?", (run_id, limit)
+        ).fetchall()
+    return _rows(rows)

@@ -19,14 +19,16 @@ import sqlite3
 import time
 import traceback
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import db
 from .config import Config, runs_dir
 from .scope import Scope, ScopeError, normalize_host
-from .tools import get_adapter, status as tool_status
+from .tools import get_adapter
+from .tools import status as tool_status
 from .tools.runner import execute
 
 STAGES = ("seed", "subdomains", "resolve", "probe", "crawl", "scan", "triage")
@@ -145,6 +147,7 @@ def start_run(
 
     ctx.stats.setdefault("program", program["name"])
     ctx.stats.setdefault("started", time.time())
+    ctx.stats.setdefault("allow_private", allow_private)
     ctx.stats.setdefault("skipped_scope", 0)
     ctx.stats.setdefault("new_assets", 0)
     ctx.stats.setdefault("new_findings", 0)
@@ -162,6 +165,7 @@ def start_run(
     ctx.log_handle = open(log_path, "a", encoding="utf-8")
 
     db.audit(con, "run_start", f"program={program['name']} dry_run={dry_run}", run_id)
+    db.audit(con, "scope_loaded", json.dumps(scope.summary())[:1200], run_id)
     ctx.log(
         f"DragonEye run {run_id} | program={program['name']} | "
         f"{'DRY RUN' if ctx.dry_run else 'live'} | "
@@ -229,13 +233,21 @@ def _stage(
 def _stage_seed(ctx: RunContext) -> None:
     seeds = ctx.scope.roots()
     if not seeds:
-        ctx.log("  ! no seedable domain/IP rules in scope (CIDR/regex/ASN only) - nothing to expand")
+        ctx.log("  ! no seedable domain/IP rules in scope (CIDR/regex only) - nothing to expand")
     assets = []
     for seed in seeds:
+        try:
+            decision = ctx.scope.check(seed)
+        except ScopeError as exc:
+            _audit_scope_reject(ctx, seed, f"invalid seed: {exc}", "scope")
+            continue
+        if not decision.allowed:
+            _audit_scope_reject(ctx, seed, decision.reason, "scope", decision.rule)
+            continue
         kind = "ip" if _is_ip(seed) else "domain"
         assets.append({"kind": kind, "value": seed, "meta": {"source": "scope", "seed": True}})
-    _ingest(ctx, assets, "scope", force_in_scope=True)
-    ctx.note("seeds", len(seeds))
+    _ingest(ctx, assets, "scope")
+    ctx.note("seeds", len(assets))
 
 
 def _hosts(ctx: RunContext) -> list[str]:
@@ -255,6 +267,59 @@ def _is_ip(value: str) -> bool:
         return False
 
 
+def _resolved_map(ctx: RunContext) -> dict[str, list[str]]:
+    """Hostname -> DNS answers, for scope checks that allow CIDR/IP rules."""
+    out: dict[str, list[str]] = {}
+    for asset in ctx.assets.values():
+        if asset.get("kind") != "domain":
+            continue
+        ips = list((asset.get("meta") or {}).get("ips") or [])
+        if not ips:
+            continue
+        try:
+            out[normalize_host(asset["value"])] = ips
+        except ScopeError:
+            continue
+    return out
+
+
+def _resolved_for_host(ctx: RunContext, value: str) -> list[str]:
+    try:
+        host = normalize_host(value)
+    except ScopeError:
+        return []
+    for (kind, item), asset in ctx.assets.items():
+        if kind != "domain":
+            continue
+        try:
+            if normalize_host(item) != host:
+                continue
+        except ScopeError:
+            continue
+        return list((asset.get("meta") or {}).get("ips") or [])
+    return []
+
+
+# Cap the number of individual rejections persisted; the count is always kept.
+MAX_AUDIT_REJECTIONS = 200
+
+
+def _audit_scope_reject(
+    ctx: RunContext,
+    target: str,
+    reason: str,
+    source: str,
+    rule: str | None = None,
+) -> None:
+    count = int(ctx.stats.get("scope_rejections", 0)) + 1
+    ctx.stats["scope_rejections"] = count
+    if count <= MAX_AUDIT_REJECTIONS:
+        detail = f"{source}: {target}: {reason}"
+        if rule:
+            detail += f" (rule {rule!r})"
+        db.audit(ctx.con, "scope_reject", detail[:1000], ctx.run_id)
+
+
 def _stage_subdomains(ctx: RunContext) -> None:
     adapter = get_adapter("subfinder")
     domains = [a["value"] for a in ctx.assets.values() if a["kind"] == "domain"]
@@ -266,6 +331,8 @@ def _stage_subdomains(ctx: RunContext) -> None:
         domains,
         workdir=ctx.raw_dir / "subfinder",
         scope=ctx.scope,
+        resolved=_resolved_map(ctx),
+        concurrency=ctx.cfg.concurrency,
         log=ctx.log,
         dry_run=ctx.dry_run,
         passive_only=ctx.passive_only,
@@ -290,6 +357,8 @@ def _stage_resolve(ctx: RunContext) -> None:
         domains,
         workdir=ctx.raw_dir / "dnsx",
         scope=ctx.scope,
+        resolved=_resolved_map(ctx),
+        concurrency=ctx.cfg.concurrency,
         log=ctx.log,
         dry_run=ctx.dry_run,
         passive_only=ctx.passive_only,
@@ -315,6 +384,8 @@ def _stage_probe(ctx: RunContext) -> None:
         hosts,
         workdir=ctx.raw_dir / "httpx",
         scope=ctx.scope,
+        resolved=_resolved_map(ctx),
+        concurrency=ctx.cfg.concurrency,
         log=ctx.log,
         dry_run=ctx.dry_run,
         passive_only=ctx.passive_only,
@@ -340,6 +411,8 @@ def _stage_crawl(ctx: RunContext) -> None:
         urls,
         workdir=ctx.raw_dir / "katana",
         scope=ctx.scope,
+        resolved=_resolved_map(ctx),
+        concurrency=ctx.cfg.concurrency,
         log=ctx.log,
         dry_run=ctx.dry_run,
         passive_only=ctx.passive_only,
@@ -366,11 +439,14 @@ def _stage_scan(ctx: RunContext) -> None:
         targets,
         workdir=ctx.raw_dir / "nuclei",
         scope=ctx.scope,
+        resolved=_resolved_map(ctx),
+        concurrency=ctx.cfg.concurrency,
         log=ctx.log,
         dry_run=ctx.dry_run,
         passive_only=ctx.passive_only,
         request_rate=ctx.cfg.request_rate,
         user_agent=ctx.cfg.user_agent,
+        extra_args=["-severity", ",".join(ctx.cfg.nuclei_severities)],
     )
     _record_tool(ctx, result)
     for item in result.findings:
@@ -400,8 +476,6 @@ def _ingest(
     ctx: RunContext,
     assets: list[dict[str, Any]],
     tool: str,
-    *,
-    force_in_scope: bool = False,
 ) -> list[dict[str, Any]]:
     stored: list[dict[str, Any]] = []
     for item in assets:
@@ -409,26 +483,33 @@ def _ingest(
         value = (item.get("value") or "").strip()
         if not value:
             continue
-        try:
-            decision = ctx.scope.check(value)
-        except ScopeError as exc:
-            ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
-            ctx.log(f"    · dropped invalid asset {value!r}: {exc}")
-            continue
-        if not decision.allowed and not force_in_scope:
-            ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
-            continue
 
         meta = dict(item.get("meta") or {})
-        if kind == "domain":
-            bad, reason = _screen_resolved_ips(ctx, meta.get("ips") or [])
-            if bad:
-                existing = ctx.assets.pop((kind, value), None)
-                if existing:
-                    db.set_asset_scope(ctx.con, int(existing["id"]), False)
-                ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
-                ctx.log(f"    · dropped {value}: {reason}")
-                continue
+        resolved = [str(ip) for ip in (meta.get("ips") or [])]
+        if not resolved:
+            resolved = _resolved_for_host(ctx, value)
+
+        try:
+            decision = ctx.scope.check(value, resolved)
+        except ScopeError as exc:
+            ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
+            _audit_scope_reject(ctx, value, f"invalid asset: {exc}", tool)
+            ctx.log(f"    · dropped invalid asset {value!r}: {exc}")
+            _drop_asset(ctx, kind, value)
+            continue
+        if not decision.allowed:
+            ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
+            _audit_scope_reject(ctx, value, decision.reason, tool, decision.rule)
+            _drop_asset(ctx, kind, value)
+            continue
+
+        bad, reason = _screen_resolved_ips(ctx, resolved)
+        if bad:
+            ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
+            _audit_scope_reject(ctx, value, reason, tool)
+            ctx.log(f"    · dropped {value}: {reason}")
+            _drop_asset(ctx, kind, value)
+            continue
 
         current = ctx.assets.get((kind, value))
         if current:
@@ -466,6 +547,22 @@ def _ingest_finding(
 ) -> None:
     matched = item.get("matched_at") or item.get("host") or ""
     template_id = item.get("template_id") or "unknown"
+
+    if matched:
+        resolved = _resolved_for_host(ctx, matched)
+        try:
+            decision = ctx.scope.check(matched, resolved)
+        except ScopeError as exc:
+            ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
+            _audit_scope_reject(ctx, matched, f"invalid finding target: {exc}", tool)
+            ctx.log(f"    · dropped finding on invalid target {matched!r}: {exc}")
+            return
+        if not decision.allowed:
+            ctx.stats["skipped_scope"] = ctx.stats.get("skipped_scope", 0) + 1
+            _audit_scope_reject(ctx, matched, decision.reason, f"{tool} finding", decision.rule)
+            ctx.log(f"    · dropped out-of-scope finding @ {matched}")
+            return
+
     try:
         host = normalize_host(matched) if matched else ""
     except ScopeError:
@@ -506,6 +603,13 @@ def _ingest_finding(
         ctx.log(f"    * new finding [{record['severity']}] {record['title']} @ {record['asset']}")
 
 
+def _drop_asset(ctx: RunContext, kind: str, value: str) -> None:
+    """Remove a previously-seen asset from this run and mark it out of scope."""
+    existing = ctx.assets.pop((kind, value), None)
+    if existing:
+        db.set_asset_scope(ctx.con, int(existing["id"]), False)
+
+
 def _screen_resolved_ips(ctx: RunContext, ips: list[str]) -> tuple[bool, str]:
     for raw in ips:
         try:
@@ -520,7 +624,7 @@ def _screen_resolved_ips(ctx: RunContext, ips: list[str]) -> tuple[bool, str]:
 def _asset_id_for(ctx: RunContext, matched: str, host: str) -> int | None:
     # Exact match wins, so a finding on /admin is attached to /admin and not to
     # the parent URL that happens to share the same host.
-    for (kind, value), record in ctx.assets.items():
+    for (_, value), record in ctx.assets.items():
         if value == matched:
             return record["id"]
     if host:
@@ -553,6 +657,14 @@ def _asset_id_for(ctx: RunContext, matched: str, host: str) -> int | None:
 
 
 def _record_tool(ctx: RunContext, result: Any) -> None:
+    for decision in getattr(result, "rejected", []) or []:
+        _audit_scope_reject(
+            ctx,
+            getattr(decision, "host", str(decision)),
+            getattr(decision, "reason", ""),
+            result.tool,
+            getattr(decision, "rule", None),
+        )
     db.add_tool_run(
         ctx.con,
         ctx.run_id,
@@ -629,6 +741,14 @@ def _finalise(ctx: RunContext, status: str) -> dict[str, Any]:
         ctx.log(f"! report generation failed: {exc}")
 
     db.audit(ctx.con, "run_finish", f"status={status}", ctx.run_id)
+    db.audit(
+        ctx.con,
+        "scope_summary",
+        f"rejected={ctx.stats.get('scope_rejections', 0)} "
+        f"skipped={ctx.stats.get('skipped_scope', 0)} "
+        f"assets={ctx.stats.get('assets_total', 0)}",
+        ctx.run_id,
+    )
     ctx.log(f"= run {ctx.run_id} {status}")
 
     if ctx.log_handle:

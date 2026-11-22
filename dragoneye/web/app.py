@@ -1,8 +1,9 @@
 """Local-only web GUI.
 
-Security posture for v0.1:
-  * binds loopback by default
-  * every mutating request needs the per-process CSRF token
+Security posture for v1.0:
+  * binds loopback by default; remote binds need --insecure-bind
+  * every mutating request needs the per-process CSRF token (header only)
+  * security headers (CSP, nosniff, same-origin framing) on every response
   * no shell execution anywhere (argv only, via the tool runner)
   * API keys are written to a 0600 file, never returned unmasked
 This is a single-user local tool, not a hosted service.
@@ -16,11 +17,11 @@ import secrets
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import __version__, db
 from ..config import (
@@ -57,20 +58,37 @@ def get_db():
 
 
 def require_token(request: Request) -> None:
-    provided = request.headers.get("x-dragoneye-token") or request.query_params.get("token") or ""
+    provided = request.headers.get("x-dragoneye-token") or ""
     if not secrets.compare_digest(provided, CSRF_TOKEN):
         raise HTTPException(status_code=403, detail="missing or invalid X-DragonEye-Token")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; frame-src 'self'; "
+        "frame-ancestors 'self'; img-src 'self' data:; connect-src 'self'",
+    )
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 # --- schemas --------------------------------------------------------------
 
 
 class ProgramIn(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=80)
     in_scope: str = ""
     out_of_scope: str = ""
-    platform: Optional[str] = None
-    note: Optional[str] = None
+    platform: str | None = None
+    note: str | None = None
 
 
 class RunIn(BaseModel):
@@ -78,21 +96,21 @@ class RunIn(BaseModel):
     dry_run: bool = False
     passive: bool = False
     usage: str = "balanced"
-    provider: Optional[str] = None
-    model: Optional[str] = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class ConfigIn(BaseModel):
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    usage: Optional[str] = None
-    base_url: Optional[str] = None
-    max_cost_usd: Optional[float] = None
-    api_key: Optional[str] = None
+    provider: str | None = None
+    model: str | None = None
+    usage: str | None = None
+    base_url: str | None = None
+    max_cost_usd: float | None = None
+    api_key: str | None = None
 
 
 class ValidationIn(BaseModel):
-    validated: Optional[str] = None
+    validated: str | None = None
 
 
 # --- static ---------------------------------------------------------------
@@ -221,13 +239,21 @@ def create_run(payload: RunIn, con=Depends(get_db)) -> dict[str, Any]:
 
     thread = threading.Thread(target=worker, name=f"dragoneye-{run_id}", daemon=True)
     with _LOCK:
+        active_ids = set(_ACTIVE)
+        running = [
+            run
+            for run in db.list_runs(con, payload.program_id, 20)
+            if run["id"] in active_ids and run["status"] == "running"
+        ]
+        if running:
+            raise HTTPException(409, "a run for this program is already active")
         _ACTIVE[run_id] = thread
     thread.start()
     return {"run_id": run_id, "status": "running"}
 
 
 @app.get("/api/runs")
-def list_runs(program_id: Optional[int] = None, limit: int = 20, con=Depends(get_db)) -> dict[str, Any]:
+def list_runs(program_id: int | None = None, limit: int = 20, con=Depends(get_db)) -> dict[str, Any]:
     return {"runs": db.list_runs(con, program_id, limit)}
 
 
@@ -259,7 +285,7 @@ async def run_events(run_id: str, con=Depends(get_db)) -> StreamingResponse:
             chunk = ""
             if log_path.exists():
                 try:
-                    with open(log_path, "r", errors="replace") as handle:
+                    with open(log_path, errors="replace") as handle:
                         handle.seek(position)
                         chunk = handle.read()
                         position = handle.tell()
@@ -337,7 +363,7 @@ def resume_run(run_id: str, con=Depends(get_db)) -> dict[str, Any]:
 
 @app.post("/api/findings/{finding_id}/validation", dependencies=[Depends(require_token)])
 def validate_finding(
-    finding_id: int, payload: Optional[ValidationIn] = None, con=Depends(get_db)
+    finding_id: int, payload: ValidationIn | None = None, con=Depends(get_db)
 ) -> dict[str, Any]:
     validated = payload.validated if payload else None
     if validated not in (None, "confirmed", "false-positive"):
@@ -357,7 +383,7 @@ def tools() -> dict[str, Any]:
 
 
 @app.get("/api/models")
-def models(provider: Optional[str] = None) -> dict[str, Any]:
+def models(provider: str | None = None) -> dict[str, Any]:
     entries = all_models()
     if provider:
         entries = [e for e in entries if e["provider"] == provider]

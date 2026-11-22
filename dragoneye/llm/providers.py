@@ -198,14 +198,27 @@ def extra_headers(provider: Provider) -> dict[str, str]:
         headers["Authorization"] = f"Bearer {key}"
     headers.update(provider.extra_headers)
     if provider.id == "openrouter":
-        headers["HTTP-Referer"] = "https://github.com/dragoneye"
+        headers["HTTP-Referer"] = "https://github.com/SanchitKumaRR/DragonEye"
         headers["X-Title"] = "DragonEye"
     return headers
 
 
-def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+def price_for(model: str) -> tuple[float, float] | None:
+    """USD per 1M tokens as (input, output), or None when unpriced."""
     name = (model or "").lower()
     for needle, price_in, price_out in PRICING:
         if needle in name:
-            return (tokens_in / 1_000_000) * price_in + (tokens_out / 1_000_000) * price_out
-    return 0.0
+            return price_in, price_out
+    return None
+
+
+def price_known(model: str) -> bool:
+    return price_for(model) is not None
+
+
+def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    price = price_for(model)
+    if price is None:
+        return 0.0
+    price_in, price_out = price
+    return (tokens_in / 1_000_000) * price_in + (tokens_out / 1_000_000) * price_out

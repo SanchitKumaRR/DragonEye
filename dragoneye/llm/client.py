@@ -15,6 +15,7 @@ from .providers import (
     estimate_cost,
     extra_headers,
     get_provider,
+    price_known,
 )
 
 
@@ -30,6 +31,7 @@ class LLMResponse:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    price_known: bool = True
     latency: float = 0.0
 
 
@@ -93,6 +95,7 @@ class LLMClient:
         headers = extra_headers(self.provider)
         if self.provider.auth == "bearer" and self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        headers.setdefault("User-Agent", "DragonEye/1.0 (+https://github.com/SanchitKumaRR/DragonEye)")
 
         url = f"{self.base_url}/chat/completions"
         last_error: str = ""
@@ -109,7 +112,7 @@ class LLMClient:
 
             if response.status_code in (429, 500, 502, 503, 504):
                 last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                _sleep(attempt)
+                _sleep(attempt, response.headers.get("retry-after"))
                 continue
             if response.status_code >= 400:
                 raise LLMError(f"HTTP {response.status_code}: {response.text[:400]}")
@@ -130,11 +133,18 @@ class LLMClient:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 cost_usd=estimate_cost(self.model, tokens_in, tokens_out),
+                price_known=price_known(self.model),
                 latency=round(time.time() - started, 2),
             )
 
         raise LLMError(last_error or "request failed")
 
 
-def _sleep(attempt: int) -> None:
-    time.sleep(min(8, 1.5 * (2**attempt)))
+def _sleep(attempt: int, retry_after: str | None = None) -> None:
+    delay = min(8.0, 1.5 * (2**attempt))
+    if retry_after:
+        try:
+            delay = min(30.0, max(delay, float(retry_after)))
+        except ValueError:
+            pass
+    time.sleep(delay)

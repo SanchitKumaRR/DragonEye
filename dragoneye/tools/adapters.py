@@ -24,7 +24,10 @@ class Subfinder(ToolAdapter):
     def build(self, targets: list[str], workdir: Path) -> list[str]:
         domains = workdir / "domains.txt"
         self.write_list(domains, targets)
-        return ["subfinder", "-dL", str(domains), "-silent", "-o", str(workdir / OUT)]
+        return [
+            "subfinder", "-dL", str(domains), "-silent", "-duc",
+            "-o", str(workdir / OUT),
+        ]
 
     def parse(self, workdir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         assets = []
@@ -50,7 +53,7 @@ class Dnsx(ToolAdapter):
     def build(self, targets: list[str], workdir: Path) -> list[str]:
         self.write_list(workdir / "inputs.txt", targets)
         return [
-            "dnsx", "-silent", "-a", "-resp", "-l", str(workdir / "inputs.txt"),
+            "dnsx", "-silent", "-a", "-resp", "-duc", "-l", str(workdir / "inputs.txt"),
             "-o", str(workdir / OUT),
         ]
 
@@ -84,7 +87,7 @@ class Httpx(ToolAdapter):
         self.write_list(workdir / "inputs.txt", targets)
         return [
             "httpx", "-silent", "-json", "-td", "-title", "-status-code", "-server",
-            "-l", str(workdir / "inputs.txt"), "-o", str(workdir / OUT),
+            "-duc", "-l", str(workdir / "inputs.txt"), "-o", str(workdir / OUT),
         ]
 
     def parse(self, workdir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -128,6 +131,9 @@ class Katana(ToolAdapter):
         self.write_list(workdir / "inputs.txt", targets)
         return [
             "katana", "-silent", "-list", str(workdir / "inputs.txt"), "-d", "2", "-jc",
+            # fqdn, not rdn: a crawl must not wander to sibling hosts that the
+            # scope engine never approved.
+            "-fs", "fqdn", "-duc",
             "-ef", "woff,woff2,css,png,svg,jpg,jpeg,gif,ico,ttf,eot,mp4,webp",
             "-o", str(workdir / OUT),
         ]
@@ -162,7 +168,10 @@ class Nuclei(ToolAdapter):
         self.write_list(workdir / "inputs.txt", targets)
         return [
             "nuclei", "-silent", "-jsonl", "-l", str(workdir / "inputs.txt"),
-            "-severity", "low,medium,high,critical", "-timeout", "10", "-retries", "1",
+            "-timeout", "10", "-retries", "1",
+            # No OOB callbacks and no template/version downloads: the only
+            # traffic is the scan itself.
+            "-ni", "-duc",
             "-o", str(workdir / OUT),
         ]
 

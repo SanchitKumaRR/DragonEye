@@ -36,6 +36,7 @@ class ToolResult:
     assets: list[dict[str, Any]] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
     skipped_out_of_scope: int = 0
+    rejected: list[Any] = field(default_factory=list)
     message: str = ""
     output_path: str | None = None
 

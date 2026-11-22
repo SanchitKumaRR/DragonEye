@@ -6,7 +6,6 @@ import json
 import sys
 import webbrowser
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -27,8 +26,8 @@ from .config import (
     save_config,
     set_api_key,
 )
-from .llm.providers import PROVIDERS, all_models, get_provider
-from .pipeline import load_context, pipeline_summary, start_run
+from .llm.providers import all_models, get_provider
+from .pipeline import pipeline_summary, start_run
 from .scope import Scope, ScopeError
 from .tools import status as tool_status
 
@@ -78,7 +77,7 @@ def _con():
     return db.connect()
 
 
-def _read_scope(file_value: Optional[str], text_value: Optional[str]) -> list[str]:
+def _read_scope(file_value: str | None, text_value: str | None) -> list[str]:
     lines: list[str] = []
     if file_value:
         if file_value == "-":
@@ -163,8 +162,8 @@ def tools(versions: bool = typer.Option(False, "--versions", help="Show detected
 
 @app.command("models")
 def models_cmd(
-    provider: Optional[str] = typer.Option(None, "--provider", "-p"),
-    search: Optional[str] = typer.Option(None, "--search", "-s", help="Filter by substring."),
+    provider: str | None = typer.Option(None, "--provider", "-p"),
+    search: str | None = typer.Option(None, "--search", "-s", help="Filter by substring."),
 ) -> None:
     """List providers and models (50+ across 16 providers)."""
     entries = all_models()
@@ -188,9 +187,9 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", help="Print commands, send no traffic."),
     passive: bool = typer.Option(False, "--passive", help="Passive tools only."),
     active: bool = typer.Option(False, "--active", help="Force active tools even if config is passive-only."),
-    usage: Optional[str] = typer.Option(None, "--usage", help="off|low|balanced|high"),
-    provider: Optional[str] = typer.Option(None, "--provider"),
-    model: Optional[str] = typer.Option(None, "--model"),
+    usage: str | None = typer.Option(None, "--usage", help="off|low|balanced|high"),
+    provider: str | None = typer.Option(None, "--provider"),
+    model: str | None = typer.Option(None, "--model"),
     no_llm: bool = typer.Option(False, "--no-llm", help="Force LLM off for this run."),
     allow_private: bool = typer.Option(False, "--allow-private", help="Permit private/loopback targets."),
 ) -> None:
@@ -268,7 +267,7 @@ def resume(run_id: str = typer.Argument(...)) -> None:
 
 @app.command("runs")
 def runs_cmd(
-    program: Optional[str] = typer.Option(None, "--program", "-p"),
+    program: str | None = typer.Option(None, "--program", "-p"),
     limit: int = typer.Option(20, "--limit"),
 ) -> None:
     """List recent runs."""
@@ -371,7 +370,7 @@ def report(
 @app.command()
 def diff(
     program: str = typer.Argument(...),
-    run_id: Optional[str] = typer.Option(None, "--run", help="Compare a specific run (default: last)."),
+    run_id: str | None = typer.Option(None, "--run", help="Compare a specific run (default: last)."),
 ) -> None:
     """What is new for a program compared to all previous runs."""
     program_row = _program_or_exit(program)
@@ -425,10 +424,20 @@ def verdict(
 
 
 @app.command()
-def audit(limit: int = typer.Option(50, "--limit")) -> None:
+def audit(
+    limit: int = typer.Option(50, "--limit"),
+    run_id: str | None = typer.Option(None, "--run", "-r", help="Only this run."),
+    action: str | None = typer.Option(None, "--action", "-a", help="e.g. scope_reject"),
+) -> None:
     """Show the execution audit log."""
     con = _con()
-    rows = db.audit_log(con, limit)
+    if run_id:
+        row = db.resolve_run(con, run_id)
+        rows = db.run_audit(con, row["id"], action, limit) if row else []
+    else:
+        rows = db.audit_log(con, limit * 4 if action else limit)
+        if action:
+            rows = [row for row in rows if row["action"] == action][:limit]
     con.close()
     table = Table(box=None, pad_edge=False)
     table.add_column("timestamp")
@@ -436,15 +445,18 @@ def audit(limit: int = typer.Option(50, "--limit")) -> None:
     table.add_column("action")
     table.add_column("detail", overflow="fold")
     for row in rows:
-        table.add_row(row["ts"], row["run_id"] or "-", row["action"], (row["detail"] or "")[:80])
+        table.add_row(row["ts"], row["run_id"] or "-", row["action"], (row["detail"] or "")[:120])
     console.print(table)
 
 
 @app.command()
 def serve(
-    host: Optional[str] = typer.Option(None, "--host"),
-    port: Optional[int] = typer.Option(None, "--port"),
+    host: str | None = typer.Option(None, "--host"),
+    port: int | None = typer.Option(None, "--port"),
     open_browser: bool = typer.Option(False, "--open", help="Open the UI in a browser."),
+    insecure_bind: bool = typer.Option(
+        False, "--insecure-bind", help="Allow binding beyond loopback (not recommended)."
+    ),
 ) -> None:
     """Start the local web GUI (binds 127.0.0.1)."""
     import uvicorn
@@ -454,9 +466,15 @@ def serve(
     host = host or cfg.web_host
     port = port or cfg.web_port
     if host not in ("127.0.0.1", "localhost", "::1"):
+        if not insecure_bind:
+            console.print(
+                "[red]refusing to bind beyond loopback.[/red] This UI can start recon runs "
+                "and write config.\nUse [bold]--insecure-bind[/bold] only on a trusted network."
+            )
+            raise typer.Exit(2)
         console.print(
-            "[yellow]warning: binding beyond loopback. This UI can start recon runs "
-            "and write config - keep it local.[/yellow]"
+            "[yellow]warning: binding beyond loopback. Anyone who can reach this port "
+            "can start scans and change config.[/yellow]"
         )
     url = f"http://{host}:{port}"
     console.print(Panel.fit(
@@ -475,14 +493,18 @@ def serve(
 @program_app.command("add")
 def program_add(
     name: str = typer.Argument(..., help="Short program name, e.g. 'acme'."),
-    in_file: Optional[str] = typer.Option(None, "--in-file", help="File with in-scope rules ('-' = stdin)."),
-    in_text: Optional[str] = typer.Option(None, "--in-text", help="In-scope rules, newline separated."),
-    out_file: Optional[str] = typer.Option(None, "--out-file", help="File with out-of-scope rules."),
-    out_text: Optional[str] = typer.Option(None, "--out-text", help="Out-of-scope rules, newline separated."),
-    platform: Optional[str] = typer.Option(None, "--platform", help="hackerone|bugcrowd|intigriti|other"),
-    note: Optional[str] = typer.Option(None, "--note", help="Policy snapshot / URL."),
+    in_file: str | None = typer.Option(None, "--in-file", help="File with in-scope rules ('-' = stdin)."),
+    in_text: str | None = typer.Option(None, "--in-text", help="In-scope rules, newline separated."),
+    out_file: str | None = typer.Option(None, "--out-file", help="File with out-of-scope rules."),
+    out_text: str | None = typer.Option(None, "--out-text", help="Out-of-scope rules, newline separated."),
+    platform: str | None = typer.Option(None, "--platform", help="hackerone|bugcrowd|intigriti|other"),
+    note: str | None = typer.Option(None, "--note", help="Policy snapshot / URL."),
 ) -> None:
     """Create or update a program's scope."""
+    name = name.strip()
+    if not name:
+        console.print("[red]program name cannot be empty[/red]")
+        raise typer.Exit(2)
     in_scope = _read_scope(in_file, in_text)
     out_scope = _read_scope(out_file, out_text)
     if not in_scope:
@@ -573,7 +595,13 @@ def scope_check(
     table.add_column("reason", overflow="fold")
     rejected = 0
     for target in targets:
-        decision = scope.check(target)
+        try:
+            decision = scope.check(target)
+        except ScopeError as exc:
+            decision = None
+            rejected += 1
+            table.add_row(target, "[red]DENY[/red]", f"invalid target: {exc}")
+            continue
         if not decision.allowed:
             rejected += 1
         style = "green" if decision.allowed else "red"
@@ -628,7 +656,7 @@ def config_set(
 @config_app.command("key")
 def config_key(
     provider: str = typer.Argument(..., help="Provider id, e.g. openai, openrouter, ollama"),
-    value: Optional[str] = typer.Option(None, "--value", help="Pass inline (avoid; use prompt)."),
+    value: str | None = typer.Option(None, "--value", help="Pass inline (avoid; use prompt)."),
     delete: bool = typer.Option(False, "--delete"),
 ) -> None:
     """Store an API key in ~/.config/dragoneye/keys.json (chmod 600)."""
@@ -702,7 +730,7 @@ def main() -> None:
     if argv[0] in ("-h", "--help"):
         _banner()
     elif argv[0] in ("-V", "--version"):
-        _banner()
+        console.print(f"DragonEye {__version__}")
         raise SystemExit(0)
     app()
 

@@ -10,26 +10,29 @@ Rule syntax (one per line, `#` comments allowed):
     *.example.com      subdomains only (no apex)
     .example.com       subdomains only (same as *.example.com)
     re:^api[0-9]+\\.    regular expression against the hostname
-    10.10.0.0/16       CIDR block (matches IPs and resolving hosts)
-    203.0.113.7        single IP
-    AS15169            ASN (only matches when the asset carries an ASN)
+    10.10.0.0/16       CIDR block (matches IPs, and hostnames whose resolved
+                       addresses are supplied by the pipeline)
+    203.0.113.7        single IP (same hostname-resolved behaviour)
     https://x.tld/...  URL -> reduced to its hostname
 
 Precedence: out-of-scope (deny) always wins, then in-scope (allow), then deny.
 Anything unmatched is out of scope. Unparseable rules raise ScopeError at load
 time, so a broken program config fails closed before any traffic is sent.
+
+Hostname-to-IP matching needs resolved addresses. The pipeline supplies them
+from the `resolve` stage; a bare `scope` check has no DNS and therefore only
+matches hostname rules.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 from urllib.parse import urlsplit
 
 LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
-ASN_RE = re.compile(r"as(\d{1,10})$", re.I)
 
 # Never touch these, regardless of what the program says.
 BLOCKED_NETWORKS = tuple(
@@ -64,14 +67,14 @@ class ScopeDecision:
 @dataclass(frozen=True)
 class Rule:
     raw: str
-    kind: str  # domain | wildcard | cidr | ip | regex | asn
+    kind: str  # domain | wildcard | cidr | ip | regex
     value: str
     regex: re.Pattern[str] | None = None
     network: ipaddress.IPv4Network | ipaddress.IPv6Network | None = None
     port: int | None = None
     note: str | None = None
 
-    def matches(self, host: str, asn: int | None = None) -> bool:
+    def matches(self, host: str) -> bool:
         if self.kind == "regex":
             return bool(self.regex and self.regex.search(host))
         if self.kind == "ip":
@@ -82,8 +85,6 @@ class Rule:
             except ValueError:
                 return False
             return self.network is not None and ip in self.network
-        if self.kind == "asn":
-            return asn is not None and str(asn) == self.value
         if self.kind == "wildcard":
             return host.endswith("." + self.value) and host != self.value
         if self.kind == "domain":
@@ -106,7 +107,7 @@ def normalize_host(target: str) -> str:
     if "://" in raw:
         parts = urlsplit(raw)
         host = parts.hostname or ""
-        port = parts.port
+        port = _url_port(raw, parts)
     else:
         value = raw.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
         if "@" in value:  # strip userinfo
@@ -122,8 +123,7 @@ def normalize_host(target: str) -> str:
             port = _as_port(maybe_port)
         else:
             host = value
-        if port is None:
-            port = None
+    del port  # scope is host-based; the parsed port is intentionally ignored
 
     host = host.strip().strip(".").lower()
     if not host:
@@ -137,6 +137,14 @@ def normalize_host(target: str) -> str:
         return host.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
         raise ScopeError(f"invalid hostname {host!r}") from exc
+
+
+def _url_port(raw: str, parts: object) -> int | None:
+    """`urlsplit(...).port` raises ValueError for malformed ports; convert it."""
+    try:
+        return parts.port
+    except ValueError as exc:
+        raise ScopeError(f"invalid port in {raw!r}: {exc}") from exc
 
 
 def _as_port(value: str) -> int | None:
@@ -161,15 +169,17 @@ def parse_rule(raw: str) -> Rule:
         except re.error as exc:
             raise ScopeError(f"bad regex {pattern!r}: {exc}") from exc
 
-    match = ASN_RE.match(text)
-    if match:
-        return Rule(text, "asn", match.group(1))
+    if re.match(r"^as\d+$", text, re.I):
+        raise ScopeError(
+            f"ASN rules are not supported ({raw!r}); use a CIDR or hostname rule"
+        )
 
     port = None
     host_part = text
     if "://" in text:
         host_part = normalize_host(text)
-        port = _as_port(urlsplit(text).port or "")
+        parts = urlsplit(text)
+        port = _url_port(text, parts)
     else:
         candidate = text.split("/", 1)[0]
         if candidate.count(":") == 1 and not text.startswith("["):
@@ -193,7 +203,7 @@ def parse_rule(raw: str) -> Rule:
 
     value = host_part.strip().lower()
     if "*" in value:
-        if not value.startswith("*."):
+        if not value.startswith("*.") or len(value) == 2:
             raise ScopeError(
                 f"unsupported wildcard position in {raw!r} (only leading '*.' is supported)"
             )
@@ -211,13 +221,10 @@ def parse_rule(raw: str) -> Rule:
     except UnicodeError as exc:
         raise ScopeError(f"invalid hostname in rule {raw!r}") from exc
 
-    label_source = value
     labels = value.split(".")
-    if not value or not all(LABEL_RE.match(lbl) for lbl in labels):
-        # Allow bare single-label hosts (e.g. "localhost" tests) but reject junk.
-        if not all(re.match(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", lbl) for lbl in labels):
-            raise ScopeError(f"invalid hostname in rule {raw!r}")
-    if len(label_source) > 253:
+    if not value or not all(LABEL_RE.match(label) for label in labels):
+        raise ScopeError(f"invalid hostname in rule {raw!r}")
+    if len(value) > 253:
         raise ScopeError(f"hostname too long in rule {raw!r}")
 
     note = "port ignored" if port else None
@@ -242,8 +249,18 @@ class Scope:
 
     # -- checks ------------------------------------------------------------
 
-    def check(self, target: str, asn: int | None = None) -> ScopeDecision:
-        host = normalize_host(target)
+    def check(self, target: str, resolved: Sequence[str] = ()) -> ScopeDecision:
+        """Decide one target.
+
+        `resolved` may carry DNS answers for a hostname (from the pipeline's
+        resolve stage). Without it, only hostname/IP-literal rules can match.
+        """
+        try:
+            host = normalize_host(target)
+        except ScopeError:
+            raise
+        except ValueError as exc:  # defensive: never leak a raw ValueError
+            raise ScopeError(str(exc)) from exc
 
         try:
             ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = (
@@ -253,31 +270,78 @@ class Scope:
             ip = None
 
         if ip is not None:
-            for network in BLOCKED_NETWORKS:
-                if ip in network:
-                    return ScopeDecision(False, host, "cloud metadata endpoint is never allowed")
-            if not self.allow_private and (
-                ip.is_loopback
-                or ip.is_private
-                or ip.is_link_local
-                or ip.is_multicast
-                or ip.is_reserved
-                or ip.is_unspecified
-            ):
-                return ScopeDecision(
-                    False,
-                    host,
-                    "private/loopback/reserved address (use --allow-private to override)",
-                )
+            blocked = _blocked_ip(ip, self.allow_private)
+            if blocked:
+                return ScopeDecision(False, host, blocked)
+
+        if ip is None and resolved:
+            denial = self._screen_resolved(host, resolved)
+            if denial is not None:
+                return denial
 
         for rule in self.deny:
-            if rule.matches(host, asn):
+            if rule.matches(host):
                 return ScopeDecision(False, host, f"matched out-of-scope rule {rule.raw!r}", rule.raw)
 
         for rule in self.allow:
-            if rule.matches(host, asn):
+            if rule.matches(host):
                 return ScopeDecision(True, host, f"matched in-scope rule {rule.raw!r}", rule.raw)
 
+        if ip is None and resolved:
+            return self._check_resolved(host, resolved)
+
+        return ScopeDecision(False, host, "not matched by any in-scope rule")
+
+    def _screen_resolved(self, host: str, resolved: Sequence[str]) -> ScopeDecision | None:
+        """Deny a hostname if any DNS answer is blocked or explicitly denied."""
+        for raw in resolved:
+            try:
+                ip = ipaddress.ip_address(normalize_host(str(raw)))
+            except (ScopeError, ValueError):
+                continue
+            blocked = _blocked_ip(ip, self.allow_private)
+            if blocked:
+                return ScopeDecision(False, host, blocked)
+            for rule in self.deny:
+                if rule.kind in ("cidr", "ip") and rule.matches(str(ip)):
+                    return ScopeDecision(
+                        False,
+                        host,
+                        f"resolved into out-of-scope rule {rule.raw!r}",
+                        rule.raw,
+                    )
+        return None
+
+    def _check_resolved(self, host: str, resolved: Sequence[str]) -> ScopeDecision:
+        """Allow a hostname whose DNS answers fall inside an allow CIDR/IP rule."""
+        matched: Rule | None = None
+        for raw in resolved:
+            try:
+                ip = ipaddress.ip_address(normalize_host(str(raw)))
+            except (ScopeError, ValueError):
+                continue
+            blocked = _blocked_ip(ip, self.allow_private)
+            if blocked:
+                return ScopeDecision(False, host, blocked)
+            for rule in self.deny:
+                if rule.kind in ("cidr", "ip") and rule.matches(str(ip)):
+                    return ScopeDecision(
+                        False,
+                        host,
+                        f"resolved into out-of-scope rule {rule.raw!r}",
+                        rule.raw,
+                    )
+            for rule in self.allow:
+                if rule.kind in ("cidr", "ip") and rule.matches(str(ip)):
+                    matched = matched or rule
+                    break
+        if matched is not None:
+            return ScopeDecision(
+                True,
+                host,
+                f"resolved into in-scope rule {matched.raw!r}",
+                matched.raw,
+            )
         return ScopeDecision(False, host, "not matched by any in-scope rule")
 
     def screen_ip(self, target: str) -> ScopeDecision:
@@ -293,20 +357,11 @@ class Scope:
             ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = ipaddress.ip_address(host)
         except ValueError:
             return ScopeDecision(True, host, "not an IP")
-        if ip is None:
-            return ScopeDecision(True, host, "not an IP")
 
         for network in BLOCKED_NETWORKS:
             if ip in network:
                 return ScopeDecision(False, host, "resolved to a cloud metadata endpoint")
-        if not self.allow_private and (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
+        if not self.allow_private and _is_private(ip):
             return ScopeDecision(
                 False,
                 host,
@@ -317,25 +372,30 @@ class Scope:
                 return ScopeDecision(False, host, f"resolved into out-of-scope rule {rule.raw!r}", rule.raw)
         return ScopeDecision(True, host, "no explicit denial")
 
-    def in_scope(self, target: str, asn: int | None = None) -> bool:
-        return self.check(target, asn).allowed
+    def in_scope(self, target: str, resolved: Sequence[str] = ()) -> bool:
+        return self.check(target, resolved).allowed
 
-    def filter(self, targets: Iterable[str]) -> tuple[list[str], list[ScopeDecision]]:
+    def filter(
+        self, targets: Iterable[str], resolved: dict[str, Sequence[str]] | None = None
+    ) -> tuple[list[str], list[ScopeDecision]]:
         """Split targets into (allowed targets, rejected decisions).
 
         Allowed targets are returned **as given** (a URL stays a URL), because
         tools like katana and nuclei need the scheme and path. Deduplication is
-        on the literal target, not the host.
+        on the literal target, not the host. `resolved` optionally maps a
+        hostname to its DNS answers so CIDR rules can match.
         """
         allowed: list[str] = []
         rejected: list[ScopeDecision] = []
         seen: set[str] = set()
+        resolved = resolved or {}
         for target in targets:
             literal = str(target).strip()
             if not literal or literal.lower() in seen:
                 continue
             try:
-                decision = self.check(literal)
+                host = normalize_host(literal)
+                decision = self.check(literal, resolved.get(host, ()))
             except ScopeError as exc:
                 rejected.append(ScopeDecision(False, literal, f"invalid target: {exc}"))
                 continue
@@ -349,11 +409,7 @@ class Scope:
     # -- introspection -----------------------------------------------------
 
     def roots(self) -> list[str]:
-        """Seed hosts implied by the in-scope rules (skip regex/asn/CIDR).
-
-        Single IPs are seedable (useful for labs and IP-scoped programs); CIDR
-        blocks are not expanded, because nobody wants 65k seeds.
-        """
+        """Seed hosts implied by the in-scope rules (skip regex/CIDR)."""
         seeds: list[str] = []
         for rule in self.allow:
             if rule.kind in ("domain", "ip") and rule.value not in seeds:
@@ -367,6 +423,26 @@ class Scope:
             "allow_private": self.allow_private,
             "seeds": self.roots(),
         }
+
+
+def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, allow_private: bool) -> str | None:
+    for network in BLOCKED_NETWORKS:
+        if ip in network:
+            return "cloud metadata endpoint is never allowed"
+    if not allow_private and _is_private(ip):
+        return "private/loopback/reserved address (use --allow-private to override)"
+    return None
+
+
+def _is_private(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return bool(
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
 
 
 def _clean(rules: Iterable[str]) -> list[str]:

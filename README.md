@@ -4,7 +4,7 @@ Scope-aware recon for bug bounty hunters. **CLI + localhost web GUI**, one SQLit
 store, one report per run.
 
 DragonEye's job is not to be another subdomain dumper. It is to be the thing that
-**never touches an asset you are not allowed to touch**, remembers everything, tells
+**never hands an out-of-scope target to a tool**, remembers everything, tells
 you what is *new* since last time, and attaches an honest, evidence-bound confidence
 score to every finding.
 
@@ -12,9 +12,10 @@ score to every finding.
 seed -> subdomains -> resolve -> probe -> crawl -> scan -> triage -> report
 ```
 
-Status: **v0.1 — working core.** 61 models across 16 providers, 5 tool adapters,
-42 tests, resumable pipeline, Markdown/JSON/HTML reports. See
-[Not built yet](#not-built-yet) for the honest gaps.
+Status: **v1.0 — stable.** 61 models across 16 providers, 5 tool adapters,
+59 tests, resumable pipeline, per-decision scope auditing, Markdown/JSON/HTML
+reports. Scope enforcement is target-list level, not network level — see
+[Safety model](#safety-model) and `SECURITY.md` before a live run.
 
 ---
 
@@ -91,8 +92,10 @@ then deny-by-default.
 | `10.10.0.0/16` | CIDR (IPs, and hostnames that resolve into it) |
 | `203.0.113.7` | single IP |
 | `re:^api\d+\.` | regex against the hostname |
-| `AS15169` | ASN (when the asset carries one) |
 | `https://app.example.com/x` | reduced to `app.example.com` |
+
+ASN rules (`AS15169`) are rejected with a clear error: no adapter supplies an
+ASN yet, and accepting the rule would create a program that can never match.
 
 Guarantees:
 
@@ -103,10 +106,13 @@ Guarantees:
 * Private/loopback/reserved IPs are blocked unless `--allow-private`.
 * Every tool receives a **pre-filtered** target list; filtering happens in one
   place (`tools/runner.py`), not per adapter.
-* DNS answers are screened too: an in-scope hostname that resolves into an
-  out-of-scope CIDR, a private range or a metadata endpoint is dropped (and
-  recorded) before any tool can reach it.
-* Every decision is written to the audit log.
+* An **out-of-scope finding is dropped before storage** and audited.
+* DNS answers are screened too: after the `resolve` stage, an in-scope hostname
+  that resolves into an out-of-scope CIDR, a private range or a metadata
+  endpoint is dropped, removed from the run and audited before a probe tool can
+  reach it. CIDR rules match hostnames through those resolved answers.
+* Every **rejected** target is written to the audit log (capped per run; totals
+  are always kept), and the effective scope is recorded at run start.
 
 ## Models
 
@@ -177,8 +183,9 @@ report.json        machine-readable, includes the full run record
 ```
 
 Reports always include: findings + confidence + reasoning, evidence excerpts, new
-assets since the last run, per-tool status/duration/scope-drops, model tokens/cost,
-calibration table, and the exact scope rules applied.
+assets since the last run, per-tool status/duration/scope-drops, the exact
+commands executed, scope rejections, model tokens/cost, calibration table, and
+the exact scope rules applied.
 
 ## Diffing
 
@@ -220,12 +227,26 @@ handled by the runner.
 
 ## Safety model
 
-* Loopback bind by default; per-process CSRF token required for every mutating
-  request; keys never returned unmasked; args as lists (no shell, no injection).
+* Loopback bind by default; remote binds are refused unless you explicitly pass
+  `--insecure-bind`. A per-process token is required for every mutating request
+  (header only), API keys are never returned unmasked, and tools run argv-only
+  (no shell, no injection).
+* Security headers (CSP, `nosniff`, frame denial) and `no-store` on API
+  responses.
 * `--dry-run` prints full commands and sends nothing.
 * `--passive` keeps only tools that do not touch the target (subfinder).
-* Audit log records every executed command and every run lifecycle event.
-* Metadata IPs and private ranges are hard-blocked by default.
+* Audit log records every executed command, the effective scope, every rejected
+  target and every run lifecycle event. Inspect it with
+  `dragoneye audit --run last --action scope_reject`.
+* Metadata IPs and private ranges are hard-blocked by default. Metadata stays
+  blocked even with `--allow-private`.
+* Katana is pinned to `fqdn` field scope and Nuclei runs with `-ni`/`-duc` so a
+  scan does not crawl sibling hosts or call out to interactsh.
+
+**Limitation:** filtering is applied to the target list handed to a tool, not to
+the packets it sends. Redirects, crawled links or CNAMEs can still reach a host
+that was never approved. A scope-enforcing proxy is on the roadmap. Run live
+scans from a machine or VM you control, and do not expose the GUI.
 
 This is a single-user local tool. Do not expose the GUI to a network.
 
@@ -233,24 +254,36 @@ This is a single-user local tool. Do not expose the GUI to a network.
 
 Ordered roughly by value:
 
-1. **Run-to-run diffing in the GUI** (the data is there; the UI only shows the latest run).
-2. **Notifications** (Discord/Telegram/webhook on new findings).
-3. **Screenshots** (gowitness) and a port/service adapter (naabu/nmap).
-4. **Scope-enforcing proxy hookup** (mitmproxy/Caido) for network-level enforcement.
+1. **Scope-enforcing proxy hookup** (mitmproxy/Caido) for network-level
+   enforcement, not just target-list filtering.
+2. **Run-to-run diffing in the GUI** (the data is there; the UI only shows the latest run).
+3. **Notifications** (Discord/Telegram/webhook on new findings).
+4. **Screenshots** (gowitness) and a port/service adapter (naabu/nmap).
 5. **More adapters** (gau, waybackurls, chaos, assetfinder, ffuf).
 6. **Batch triage** — the `batch_size` budget field exists but triage is per-finding.
 7. **Calibration dashboard**, program importers (HackerOne API), scheduled runs.
-8. **Packaging** — no PyPI wheel, no `pipx` entry point yet.
+8. **PyPI publication** — `pipx install .` works from a checkout; no wheel is
+   published yet.
 
 ## Development
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q         # 42 tests
+.venv/bin/pip install -e .
+.venv/bin/python -m pytest -q         # 59 tests
+.venv/bin/ruff check .
 ```
 
 The scope engine has the densest test coverage on purpose — it is the component
-where a bug is both most likely and most expensive.
+where a bug is both most likely and most expensive. CI runs the suite and linter
+on Python 3.11–3.13.
+
+## Project docs
+
+- `CHANGELOG.md` — what changed in 1.0.
+- `SECURITY.md` — threat model, reporting, and the network-enforcement gap.
+- `CONTRIBUTING.md` — dev setup and ground rules.
+- `LICENSE` — MIT.
 
 ## Disclaimer
 

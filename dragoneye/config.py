@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import __version__
 
 APP_NAME = "dragoneye"
 DEFAULT_MODEL = "gpt-4o-mini"
@@ -53,6 +56,11 @@ def runs_dir() -> Path:
 def ensure_dirs() -> None:
     for path in (config_dir(), data_dir(), runs_dir()):
         path.mkdir(parents=True, exist_ok=True)
+    for path in (config_dir(), data_dir()):
+        try:
+            path.chmod(0o700)
+        except OSError:
+            pass
 
 
 @dataclass
@@ -79,7 +87,7 @@ class Config:
     nuclei_severities: list[str] = field(
         default_factory=lambda: ["low", "medium", "high", "critical"]
     )
-    user_agent: str = "DragonEye/0.1 (scope-aware recon)"
+    user_agent: str = f"DragonEye/{__version__} (+https://github.com/SanchitKumaRR/DragonEye)"
     web_host: str = "127.0.0.1"
     web_port: int = 8765
 
@@ -109,6 +117,16 @@ def load_config() -> Config:
         cfg.llm = _merge(LLMConfig, raw["llm"])
     if cfg.llm.usage not in USAGE_LEVELS:
         cfg.llm.usage = "balanced"
+    if cfg.llm.timeout < 1:
+        cfg.llm.timeout = 120
+    if cfg.llm.max_cost_usd is not None and cfg.llm.max_cost_usd <= 0:
+        cfg.llm.max_cost_usd = None
+    if cfg.concurrency < 1:
+        cfg.concurrency = 4
+    if cfg.request_rate < 1:
+        cfg.request_rate = 25
+    if not isinstance(cfg.nuclei_severities, list) or not cfg.nuclei_severities:
+        cfg.nuclei_severities = ["low", "medium", "high", "critical"]
     return cfg
 
 
@@ -150,8 +168,21 @@ def set_api_key(provider: str, key: str) -> Path:
     else:
         keys.pop(provider, None)
     path = keys_path()
-    path.write_text(json.dumps(keys, indent=2) + "\n")
-    path.chmod(0o600)
+    # Write via a 0600 temp file + atomic rename: the key is never readable by
+    # other users, even for the instant between create and chmod.
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".keys-", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(keys, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
     return path
 
 

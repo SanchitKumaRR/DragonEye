@@ -1,24 +1,45 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "dragoneye"
-version = "0.1.0"
+version = "1.0.0"
 description = "Scope-aware recon framework for bug bounty hunters (CLI + local web GUI)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Sanchit Kumar" }]
+keywords = ["security", "bug-bounty", "recon", "scope", "subdomain", "nuclei"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
 dependencies = [
-    "typer>=0.12",
-    "rich>=13.7",
-    "httpx>=0.27",
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
+    "typer>=0.12,<1",
+    "rich>=13.7,<15",
+    "httpx>=0.27,<0.29",
+    "fastapi>=0.110,<1",
+    "uvicorn>=0.29,<1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8,<10", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/SanchitKumaRR/DragonEye"
+Repository = "https://github.com/SanchitKumaRR/DragonEye"
+Issues = "https://github.com/SanchitKumaRR/DragonEye/issues"
 
 [project.scripts]
 dragoneye = "dragoneye.cli:main"
@@ -31,3 +52,12 @@ include = ["dragoneye*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "I", "B", "UP"]
+ignore = ["B008"]

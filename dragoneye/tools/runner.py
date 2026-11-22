@@ -13,8 +13,9 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from ..scope import Scope
 from .base import ToolAdapter, ToolResult
@@ -32,8 +33,10 @@ def execute(
     dry_run: bool = False,
     passive_only: bool = False,
     request_rate: int = 25,
+    concurrency: int = 4,
     user_agent: str | None = None,
     extra_args: Sequence[str] = (),
+    resolved: dict[str, Sequence[str]] | None = None,
 ) -> ToolResult:
     result = ToolResult(tool=adapter.spec.name)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -44,8 +47,9 @@ def execute(
         log(f"  ! {adapter.spec.name}: {result.message}")
         return result
 
-    allowed, rejected = scope.filter(targets)
+    allowed, rejected = scope.filter(targets, resolved=resolved)
     result.skipped_out_of_scope = len(rejected)
+    result.rejected = rejected
     if result.skipped_out_of_scope:
         log(f"  ! {adapter.spec.name}: dropped {result.skipped_out_of_scope} out-of-scope target(s)")
 
@@ -56,7 +60,7 @@ def execute(
         return result
 
     cmd = adapter.build(list(allowed), workdir)
-    cmd = _apply_limits(cmd, adapter, request_rate, user_agent)
+    cmd = _apply_limits(cmd, adapter, request_rate, concurrency, user_agent)
     if extra_args:
         cmd = [*cmd, *[str(arg) for arg in extra_args]]
     result.command = cmd
@@ -142,18 +146,32 @@ def execute(
 
 
 def _apply_limits(
-    cmd: list[str], adapter: ToolAdapter, request_rate: int, user_agent: str | None
+    cmd: list[str],
+    adapter: ToolAdapter,
+    request_rate: int,
+    concurrency: int,
+    user_agent: str | None,
 ) -> list[str]:
-    """Add rate/UA flags only for tools that understand them."""
+    """Add rate/UA/concurrency flags only for tools that understand them."""
     args = list(cmd)
     rate_flags = {
         "nuclei": "-rl",
         "katana": "-rl",
         "httpx": "-rl",
     }
+    concurrency_flags = {
+        "subfinder": "-t",
+        "dnsx": "-t",
+        "httpx": "-t",
+        "katana": "-c",
+        "nuclei": "-c",
+    }
     flag = rate_flags.get(adapter.spec.name)
     if flag and request_rate > 0 and flag not in args:
         args.extend([flag, str(request_rate)])
+    cflag = concurrency_flags.get(adapter.spec.name)
+    if cflag and concurrency > 0 and cflag not in args:
+        args.extend([cflag, str(concurrency)])
     if user_agent:
         ua_flag = {"nuclei": "-H", "httpx": "-H", "katana": "-H"}.get(adapter.spec.name)
         if ua_flag and ua_flag not in args:
