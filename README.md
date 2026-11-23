@@ -46,6 +46,38 @@ The fast path needs no program setup:
 dragoneye quick example.com            # scope + scan + triage + report
 dragoneye quick example.com --dry-run  # print the exact commands, send nothing
 dragoneye doctor                       # is this machine ready?
+## Installation
+
+### Quick installation
+
+```bash
+git clone https://github.com/SanchitKumaRR/DragonEye.git DragonEye
+cd DragonEye
+python3 -m venv .venv
+.\.venv\Scriptsctivate.bat  # Windows
+# . .venv/bin/activate  # Linux/macOS
+pip install -r requirements.txt
+pip install -e .
+```
+
+### Manual installation
+
+```bash
+# Using pip
+pip install -e git+https://github.com/SanchitKumaRR/DragonEye.git@main#egg=dragoneye
+
+# Using pipx (recommended for isolation)
+pipx install .
+```
+
+### Post-installation
+
+```bash
+dragoneye quick example.com           # one-shot recon
+dragoneye doctor                      # check your environment
+dragoneye shell                       # start the interactive console
+```
+
 ```
 
 `quick` derives a program named after the target (so `api.example.com` and
