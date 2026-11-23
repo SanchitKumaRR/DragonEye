@@ -326,3 +326,35 @@ Only test assets you are authorised to test, and follow each program's policy
 (rate limits, prohibited techniques, disclosure rules). DragonEye enforces the scope
 you give it; it cannot verify that the scope is correct or that you have permission.
 You are responsible for your traffic.
+
+### Windows Installation
+
+**Prerequisites:**
+- [Python](https://www.python.org/downloads/) (3.11+)
+- [Git](https://git-scm.com/download/win) (optional, for cloning the repository)
+
+**Using pip (recommended):**
+```bash
+git clone https://github.com/SanchitKumaRR/DragonEye.git DragonEye
+cd DragonEye
+python -m venv .venv
+.\.venv\Scripts\activate.bat
+pip install -r requirements.txt
+pip install -e .
+```
+
+**Using scoop (package manager):**
+```bash
+scoop install python
+scoop install git
+pip install -e .  # after cloning the repo
+```
+
+**Using winget:**
+```bash
+winget install --id=Python.Python.3.11
+winget install --id=Git.Git
+git clone https://github.com/SanchitKumaRR/DragonEye.git DragonEye
+cd DragonEye
+.\.venv\Scripts\activate.bat
+```
