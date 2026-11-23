@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Sanchit Kumar" }]
-keywords = ["security", "bug-bounty", "recon", "scope", "subdomain", "nuclei"]
+keywords = ["security", "bug-bounty", "recon", "scope", "subdomain", "nuclei", "penetration-testing", "vulnerability-scanning", "CTF", "tools", "python-security", "bug-bounty-automation", "scope-enforcement", "subdomain-enumeration", "HTTP-probing", "nuclei-templates", "LLM-assisted", "bug-bounty-tools", "recon-framework", "scope-rules", "audit-log", "calibration", "interactive-console", "one-shot", "CLI", "web-GUI"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",

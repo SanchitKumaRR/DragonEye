@@ -1,0 +1,408 @@
+# How DragonEye v1.6 Works (Under the Hood)
+
+## Overview
+
+DragonEye is a scope-aware recon framework for bug bounty hunters. Version 1.6 replaces
+the broken AI shell executor with three practical surfaces:
+
+1. **`dragoneye quick <target>`** — one-shot: derive a program, extend its scope,
+   run the pipeline, print the report path.
+
+2. **`dragoneye` (no args) / `dragoneye shell`** — interactive console with tab
+   completion, persistent readline history, and a full command set.
+
+3. **`dragoneye doctor`** — environment health check with `--json` for scripting.
+
+Everything maps to a known operation; no model output is executed as a shell command.
+
+---
+
+## Architecture
+
+```
+dragoneye/
+  cli.py          Typer CLI + shared entry point
+  console.py      Interactive REPL (readline + completion)
+  quick.py        One-shot: target -> program -> pipeline -> report
+  doctor.py       Environment diagnostics
+  ui.py           Shared banner/colour helpers
+  db.py           SQLite persistence (programs, runs, assets, findings)
+  pipeline.py     Staged recon pipeline (seed -> subdomains -> resolve -> probe -> crawl -> scan -> triage -> report)
+  scope.py        Rule parsing + decisions (heavily tested; fail-closed)
+  tools/          Base contract + 5 adapters (subfinder, dnsx, httpx, katana, nuclei)
+  llm/            Providers, budgets, client, triage
+  report.py       JSON/Markdown/HTML report generation
+```
+
+---
+
+## CLI Entry Point
+
+`dragoneye/cli.py` is the main dispatch. The `main()` function:
+
+1. If no args and stdin is a TTY → open the console (`console.run_console()`).
+2. If no args and stdin is not a TTY → print the landing page (`_quick_help()`).
+3. If args are present → dispatch to the Typer app (`app()`), which handles
+   `quick`, `doctor`, `shell`, `run`, `show`, `diff`, `report`, `assets`,
+   `findings`, `tools`, `config`, `theme`, `slumber`, etc.
+
+The Typer app registers every command, sets up shared state (config, database
+connection), and delegates to the appropriate handler.
+
+---
+
+## Interactive Console (`console.py`)
+
+The console is a small REPL built on `rich` and `readline`:
+
+- **Startup**: `run_console()` prints the wordmark, then enters a `while True`
+  loop reading lines from `input()`.
+- **Dispatch**: `dispatch()` parses the line with `shlex.split()`, lowercases
+  the first word, looks up `do_<command>`, and calls it.
+- **Completion**: `_completer()` provides tab completion for commands, program
+  names, run IDs, and `--flags`. It queries the database for program names
+  and run IDs.
+- **History**: Up/down arrow cycles through lines saved to
+  `~/.local/share/dragoneye/history` (via readline).
+- **Safety**: Every `do_*` method returns `True` to continue, `False` to
+  exit. A bad command never kills the session; it just prints an error.
+
+Key `do_*` methods:
+
+| Method | What it does |
+|---|---|
+| `do_quick` | Parses `quick <target> [flags]`, confirms once if live, runs `quick_run()` |
+| `do_use` | Selects a program by name (`use acme`) |
+| `do_run` | Runs the active program with given flags |
+| `do_show` | Summarises a run (`show last` / `show <id>`) |
+| `do_diff` | Shows new assets/findings since previous runs |
+| `do_assets` / `do_findings` | Cumulative inventory across all runs |
+| `do_scope` | Dry-check targets against the active program's scope |
+| `do_doctor` | Runs `doctor.run_checks()` and prints a table |
+| `do_config` | `config`, `config set k v`, `config key provider` |
+| `do_theme` / `do_slumber` | Toggle normal/awakened theme |
+| `do_exit` / `do_quit` | `return False` → exit loop |
+
+All `do_*` methods catch their own errors and print rich-formatted messages;
+the main loop never crashes on a bad command.
+
+---
+
+## One-Shot Quick (`quick.py`)
+
+`quick_run(con, target, cfg, ...)` is the fast path:
+
+1. **Derive a host**: `derive_host(target)` normalises the target (URL, host,
+   IP, CIDR member) into a bare hostname/IP via `scope.normalize_host()`.
+2. **Derive a program name**: `program_name_for(host)` creates a stable name.
+   `www.example.com` and `api.example.com` both → `example.com`. `203.0.113.7`
+   → `203.0.113.7`. For `co.uk` second-level domains (e.g. `example.co.uk`),
+   the base is `example.co.uk`.
+3. **Find or create a program**: `db.get_program(con, name)` looks it up. If
+   not found, `db.add_program(con, name, in_scope, out_scope, platform, note)`
+   creates it. The target hostname is prepended to the in-scope rules so it's
+   always runnable.
+4. **Scope check**: `Scope(in_scope, out_scope)` is constructed and
+   `scope.check(host)` is called. If denied, `ScopeError` is raised.
+5. **Run the pipeline**: `start_run(con, program, cfg, dry_run, passive_only,
+   llm_usage, echo, ...)` executes the stages synchronously.
+6. **Return result**: The run dict plus `pipeline_summary(con, run_id)` for the
+   end-of-run display.
+
+The `quick` CLI command (`cli.py`) wraps this with a confirmation prompt for
+live runs, `--dry-run`, `--passive`, `--no-llm`, `--open`, `--yes`.
+
+---
+
+## Interactive Console vs CLI Commands
+
+Both the console and the CLI share the same underlying functions:
+
+- `quick_run()` — the engine behind `dragoneye quick` and the console's `quick`
+  command.
+- `start_run()` / `pipeline_summary()` — behind `run`, `show`, `diff`, `report`.
+- `run_checks()` — behind `doctor` (both CLI and console).
+- `db.list_programs()`, `db.get_program()`, `db.add_program()` — shared by
+  `use`, `programs`, `new`, and console completion.
+
+The console merely presents them with a prompt, history, and tab completion.
+
+---
+
+## Diagnostics: `doctor.py`
+
+`run_checks(cfg)` returns a list of `Check` dataclasses:
+
+| Check | What it validates |
+|---|---|
+| `python` | Version >= 3.11 |
+| `python deps` | `typer`, `rich`, `httpx`, `fastapi`, `uvicorn` importable |
+| `config dir` | `~/.config/dragoneye/` is writable |
+| `data dir` | `~/.local/share/dragoneye/` is writable |
+| `database` | SQLite file exists, schema is version 2, programs are readable |
+| `recon tools` | Which of subfinder/dnsx/httpx/katana/nuclei are on `$PATH` |
+| `scope` | Every program's in-scope/out-of-scope rules parse cleanly |
+| `model` | Provider/model config is valid; if `llm.usage=off` → ok, else API key check |
+| `safety` | `allow_private` flag and `DRAGONEYE_INSECURE` env var |
+| `version` | Printed for reference |
+
+`overall(checks)` returns `OK`/`WARN`/`FAIL`; `doctor_summary(checks)` gives the
+"8 ok · 2 warn · 0 fail" blurb.
+
+`doctor` CLI/console passes `--json` to dump a machine-readable list.
+
+---
+
+## Core Pipeline (`pipeline.py`)
+
+The pipeline is a fixed stage order:
+
+```
+seed -> subdomains -> resolve -> probe -> crawl -> scan -> triage -> report
+```
+
+Each stage is a function `_stage_seed`, `_stage_subdomains`, etc. The `_execute()`
+wrapper:
+
+1. Checks if the stage was already done (resume).
+2. Checks `passive_only` flag.
+3. Calls the stage function.
+4. On success, records the stage in `stages_done`, times it, updates the run
+   row in DB.
+5. On failure, catches the exception, marks the run `failed`, writes the error,
+   but **always** finalises the report.
+
+Key invariants:
+- Only in-scope assets are ever stored or fed to a tool.
+- A missing tool is reported, never fatal.
+- A run always produces a report, even if a stage fails.
+
+### Stages (summarised)
+
+| Stage | Tool | What it does |
+|---|---|---|
+| `seed` | — | Derives seed hosts from the program's in-scope rules; adds them as assets. |
+| `subdomains` | `subfinder` | Passive subdomain enumeration. |
+| `resolve` | `dnsx` | DNS resolution; supplies IP answers for scope CIDR matching. |
+| `probe` | `httpx` | HTTP probing; marks hosts as live, gathers status, title, webserver, tech. |
+| `crawl` | `katana` | Bounded crawl (fqdn scope, limited depth 2) to discover URLs and parameters. |
+| `scan` | `nuclei` | Template-based vulnerability scanning (`-ni -duc` to prevent OOB/leakage). |
+| `triage` | LLM (if `usage != off`) | Calls the chosen model on ranked findings, with bounded local greps. |
+| `report` | — | Generates `report.html`, `report.md`, `report.json`. |
+
+The `_finalise()` function writes the reports, updates the run status, and
+persists scope audit data.
+
+---
+
+## Scope Engine (`scope.py`)
+
+The scope engine is the heart of the "never hand an out-of-scope target to a
+tool" guarantee. It is deliberately boring, dependency-free, and heavily tested.
+
+### Rule syntax (one per line, `#` comments)
+
+| Rule type | Example | Matches |
+|---|---|---|
+| `domain` | `example.com` | Apex + all subdomains |
+| `wildcard` | `*.example.com` or `.example.com` | Subdomains only (not apex) |
+| `cidr` | `10.10.0.0/16` | IPs + hostnames resolved into the CIDR |
+| `ip` | `203.0.113.7` | Single IP |
+| `regex` | `re:^api\d+\.` | Regex against hostname |
+| `url` | `https://app.example.com/x` | Reduced to `app.example.com` |
+
+### Precedence (always)
+
+1. **Out-of-scope (deny) wins** — if any deny rule matches, the target is rejected.
+2. **In-scope (allow)** — first matching allow rule wins.
+3. **Deny-by-default** — if nothing matches, the target is out of scope.
+
+### Special behaviours
+
+- **Cloud metadata blocked** — `169.254.169.254/32`, `fd00:ec2::254/128`,
+  `100.100.100.200/32` are always denied regardless of rules.
+- **Private/loopback blocked** — unless `--allow-private` is passed.
+- **DNS-screened** — after resolve, a hostname that resolves into a denied
+  CIDR/private/metadata range is dropped and audited.
+- **ASN rules rejected** — with a clear error; no adapter supplies ASN.
+
+The `Scope.check(target, resolved)` method takes optional DNS answers (from the
+resolve stage) so CIDR rules can match resolved IPs. `Scope.filter(targets,
+resolved)` splits a target list into `(allowed, rejected)` with deduplication.
+
+---
+
+## Tool Adapters (`tools/`)
+
+Adding a tool is one class subclassing `ToolAdapter`, filling in `spec`, `build()`
+and `parse()`:
+
+```python
+class Subfinder(ToolAdapter):
+    spec = ToolSpec(
+        name="subfinder",
+        binary="subfinder",
+        passive=True,
+        description="Passive subdomain enumeration",
+        install_hint="go install ...",
+    )
+    def build(self, targets, workdir):
+        # Write targets to domains.txt, return argv
+        return ["subfinder", "-dL", str(domains), "-silent", "-duc", "-o", str(workdir / OUT)]
+    def parse(self, workdir):
+        # Read out.txt, return (assets, findings)
+        assets = []
+        for line in self.read_lines(workdir / OUT):
+            host = line.split()[0].lower().strip(".")
+            if host and "." in host:
+                assets.append({"kind": "domain", "value": host, ...})
+        return assets, []
+```
+
+The `runner.execute()` function (in `tools/runner.py`) is the single place
+that handles:
+
+- Scope filtering (the tool never receives out-of-scope targets).
+- argv-only execution (no shell, no injection).
+- Process-group kill on timeout.
+- stdout/stderr capture to disk (`workdir/out.txt`, `workdir/console.log`).
+- Audit logging (`db.add_tool_run()`).
+
+Each adapter's `build()` returns a **list** (never a shell string). The runner
+joins it safely for `subprocess.Popen()`.
+
+Current adapters: `Subfinder`, `Dnsx`, `Httpx`, `Katana`, `Nuclei`.
+
+---
+
+## Database (`db.py`)
+
+SQLite with WAL mode, foreign keys, and a versioned schema (`PRAGMA user_version = 2`).
+
+### Tables (key ones)
+
+- `programs` — name, platform, policy_note, in_scope (JSON), out_of_scope (JSON).
+- `runs` — id, program_id, status, dry_run, passive_only, llm_usage, llm_provider,
+  llm_model, outdir, started_at, finished_at, error, state (JSON), stats (JSON).
+- `assets` — program_id, kind, value, source_tool, in_scope, first_seen_run,
+  last_seen_run, meta (JSON). UNIQUE(program_id, kind, value).
+- `run_assets` — run_id, asset_id, is_new. Bridges runs and assets.
+- `findings` — program_id, fingerprint (SHA-256), tool, template_id, title,
+  severity, asset_id, evidence_path, raw (JSON). UNIQUE(program_id, fingerprint).
+- `finding_runs` — run_id, finding_id, is_new.
+- `llm_verdicts` — finding_id, run_id, provider, model, verdict, confidence,
+  band, reasoning, counter_evidence, next_step, tokens_in, tokens_out, cost_usd,
+  validated, created_at.
+- `tool_runs` — per-tool execution record (command, exit_code, duration, etc.).
+- `audit` — timestamp, run_id, action, detail (scope_reject, run_start, etc.).
+
+### Key functions
+
+- `upsert_asset()` — insert or update; returns `(asset_id, is_new_for_program)`.
+- `upsert_finding()` — insert or update; fingerprint dedupes across runs.
+- `diff_assets(program_id, run_id)` — assets seen in this run that were never
+  seen in an earlier run (is_new=1).
+- `run_findings(run_id)` — every finding for a run, ordered by severity.
+- `calibration(program_id)` — how often each confidence band was actually right
+  (validated yes/no).
+- `list_assets()`, `list_findings()` — new in v1.6, cumulative queries.
+
+---
+
+## LLM Triage (`llm/`)
+
+The LLM client (`client.py`) covers almost every OpenAI-compatible endpoint:
+OpenAI, Anthropic, Gemini, DeepSeek, Groq, Mistral, xAI, OpenRouter, Together,
+Fireworks, Perplexity, Ollama, LM Studio, vLLM, Azure, and `custom`.
+
+### Budgets (`budgets.py`)
+
+Three usage tiers:
+
+| Tier | Review limit | Evidence chars | Search rounds |
+|---|---|---|---|
+| `off` | none | – | – |
+| `low` | top 10 | 1,200 chars | 0 |
+| `balanced` | top 50 | 4,000 chars | 1 |
+| `high` | top 500 | 12,000 chars | 3 |
+
+Each finding gets a verdict JSON (`verdict`, `confidence`, `reasoning`,
+`counter_evidence`, `next_step`, `needs_more_data`). The model may request
+one local search (`{"action": "search", "query": "..."}`) before answering.
+
+### Triage flow (`triage.py`)
+
+1. Rank findings by severity + hot keywords (RCE, SQLi, SSRF, etc.).
+2. Take top `budget.review_limit` findings.
+3. For each, send the finding + evidence excerpt to the model.
+4. If the model replies `{"action": "search", "query": "..."}`, execute a
+   bounded grep over the raw tool output directory (`EvidenceIndex.search()`),
+   then re-send.
+5. Store the verdict, confidence, band, reasoning, cost.
+6. Continue until budget exhausted or all assessed.
+
+Every billable response (including search rounds) is tracked for tokens and cost.
+
+---
+
+## Reporting (`report.py`)
+
+Three formats from `build_report()`:
+
+- **JSON** (`report.json`) — machine-readable run record.
+- **Markdown** (`report.md`) — pasteable into reports/notes.
+- **HTML** (`report.html`) — dark, printable, with CSP, severity tags,
+  evidence excerpts, scope rules, tool execution, model calibration, scope
+  rejections.
+
+The HTML includes a "Scope applied" section, "Scope rejections" table, and a
+"Tool execution" table with commands.
+
+The web GUI (`web/app.py`) serves these files and adds an inline preview (so
+the iframe renders the report instead of prompting a download).
+
+---
+
+## Web GUI (`web/app.py`)
+
+FastAPI-based, binds `127.0.0.1:8765` by default. Security posture:
+
+- **CSRF token** on every mutating request (header `X-DragonEye-Token`).
+- **Security headers** on every response: `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer`,
+  `Content-Security-Policy` with strict directives.
+- **No shell execution** anywhere — argv only, via the tool runner.
+- **API keys** written to `~/.config/dragoneye/keys.json` mode 0600, never
+  returned unmasked (preview: first 4 + last 4 chars).
+- **Remote binds refused** unless `--insecure-bind` is passed; a warning is
+  shown if someone tries.
+
+Endpoints include: `/api/programs`, `/api/runs`, `/api/runs/{id}/events`
+(SSE log stream), `/api/runs/{id}/report`, `/api/config`, `/api/tools`,
+`/api/models`, program CRUD, scope checks, run start/resume, verdict
+validation.
+
+The static `index.html` has been cleaned up: invalid CSS removed, install
+button now returns the exact install command (no silent install), report
+iframe sources the inline HTML endpoint.
+
+---
+
+## Summary of the v1.6 Changes
+
+| Area | What changed |
+|---|---|
+| **CLI** | `quick`, `doctor`, `shell`, `assets`, `findings`, `theme`, `slumber` added;
+  `awaken` removed; unified end-of-run output (`_print_result`). |
+| **Console** | New REPL with readline history, tab completion, every command maps to a known op. |
+| **Quick** | Derives program from target, extends scope, runs pipeline, prints report. |
+| **Doctor** | Checks Python, deps, XDG dirs, DB, tools, scope, model config, safety. `--json`. |
+| **Theme** | `theme` / `slumber` toggle normal/red; no AI shell executes model output. |
+| **Database** | `list_assets()`, `list_findings()` cumulative queries; `add_program` upsert fix. |
+| **Web GUI** | Tool install returns exact command; HTML served inline; CSRF fixed; invalid CSS removed. |
+| **Tests** | 69 pass (was 59); new console/quick/doctor tests. |
+| **Version** | 1.6.0. |
+
+Everything is designed so that no mystery happens: every command does one thing,
+the prompt tells you what it's doing, and the audit log records exactly what the
+scope engine rejected, what commands were run, and what the model decided.

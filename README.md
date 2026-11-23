@@ -1,7 +1,10 @@
-# DragonEye
+# DragonEye v1.6 — Daily-Driver Release
 
-Scope-aware recon for bug bounty hunters. **CLI + localhost web GUI**, one SQLite
-store, one report per run.
+**Scope-aware recon for bug bounty hunters. CLI + localhost web GUI. Prevents off-scope scans, deduplicates findings, and includes an interactive console, environment diagnostics, and one-shot `quick` command.**
+
+**Keywords:** security, bug-bounty, recon, scope, subdomain, nuclei, penetration-testing, vulnerability-scanning, CTF, tools, python-security, bug-bounty-automation, scope-enforcement, subdomain-enumeration, HTTP-probing, nuclei-templates, LLM-assisted, bug-bounty-tools, recon-framework, scope-rules, audit-log, calibration, interactive-console, one-shot, CLI, web-GUI
+
+**Status:** v1.6 — daily-driver release. Interactive console, one-shot `quick` runs, environment diagnostics, cumulative asset/finding inventory, 61 models across 16 providers, 5 tool adapters, 69 tests, resumable pipeline, per-decision scope auditing, Markdown/JSON/HTML reports. Scope enforcement is target-list level, not network level — see [Safety model](#safety-model) and `SECURITY.md` before a live run.
 
 DragonEye's job is not to be another subdomain dumper. It is to be the thing that
 **never hands an out-of-scope target to a tool**, remembers everything, tells
@@ -10,24 +13,6 @@ score to every finding.
 
 ```
 seed -> subdomains -> resolve -> probe -> crawl -> scan -> triage -> report
-```
-
-Status: **v1.6 — daily-driver release.** Interactive console, one-shot `quick`
-runs, environment diagnostics, cumulative asset/finding inventory, 61 models
-across 16 providers, 5 tool adapters, 69 tests, resumable pipeline, per-decision
-scope auditing, Markdown/JSON/HTML reports. Scope enforcement is target-list
-level, not network level — see [Safety model](#safety-model) and `SECURITY.md`
-before a live run.
-
----
-
-## Install
-
-```bash
-git clone https://github.com/SanchitKumaRR/DragonEye.git DragonEye && cd DragonEye
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/pip install -e .
 ```
 
 External recon binaries are **optional** and never auto-installed. See
