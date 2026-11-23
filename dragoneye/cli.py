@@ -548,18 +548,57 @@ def awaken() -> None:
                     if cmd and not cmd.startswith("#"):
                         console.print(" " + str(i) + ". [bold cyan]" + cmd + "[/bold cyan]")
                 console.print("\n[bold]Execute these commands?[/bold] (y/n)")
-                if typer.confirm("", default=False):
-                    import subprocess
-                    if len(commands) == 1:
-                        cmd = commands[0].strip()
+                if not typer.confirm("", default=True):
+                    console.print("[yellow]Commands skipped.[/yellow]")
+                    continue
+                dry_run = False
+                # Join commands into single string if multiple, otherwise use single
+                if len(commands) == 1:
+                    cmd = commands[0].strip()
+                else:
+                    cmd = "\n".join(c.strip() for c in commands if c.strip())
+                # Validate command safety before execution
+                if cmd and not cmd.startswith("#"):
+                    dangerous_patterns = ["rm -rf /", "dd if=", "mkfs", "> /dev/"]
+                    is_dangerous = any(pattern in cmd for pattern in dangerous_patterns)
+                    if is_dangerous:
+                        console.print("[red]WARNING: Potentially dangerous command detected![/red]")
+                        console.print("This command may cause data loss or system damage.")
+                        if not typer.confirm("", default=False):
+                            console.print("[yellow]Command skipped due to safety check.[/yellow]")
+                            continue
+                    # Execute or dry-run based on mode
+                    if dry_run:
+                        console.print("[dim]Dry-run mode: Would execute: [/dim][bold cyan]" + cmd + "[/bold cyan]")
+                        result = type('obj', (object,), {'stdout': cmd, 'stderr': '', 'returncode': 0})()
                     else:
-                        cmd = "\n".join(c.strip() for c in commands if c.strip())
-                    result = subprocess.run(
-                        cmd,
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=30)
+                        try:
+                            result = subprocess.run(
+                                cmd,
+                                shell=True,
+                                capture_output=True,
+                                text=True,
+                                timeout=30)
+                            # Log executed command
+                            import datetime
+                            log_entry = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] CMD: {cmd[:80]}..."
+                            console.print("[dim]" + log_entry + "[/dim]")
+                        except subprocess.TimeoutExpired:
+                            console.print("[red]Command timed out after 30 seconds.[/red]")
+                            result = type('obj', (object,), {'stdout': '', 'stderr': 'Command timed out', 'returncode': -1})()
+                    # Handle command execution results
+                    if result and result.returncode != 0:
+                        console.print("[red]Command failed with exit code: " + str(result.returncode) + "[/red]")
+                        console.print("[red]STDERR: " + result.stderr[-200:] + "[/red]")
+                        if not typer.confirm("", default=False):
+                            console.print("[yellow]Task failed, skipping to next task.[/yellow]")
+                            continue
+                    elif result and result.returncode == 0:
+                        console.print("[green]Command executed successfully.[/green]")
+                        console.print("[green]STDOUT: " + result.stdout[-200:] + "[/green]")
+                else:
+                    console.print("[yellow]No valid commands to execute.[/yellow]")
+                    result = None
                     result_output = result.stdout[-100:] + "\n" + result.stderr[-100:]
                     # Store in context - summary of what happened
                     result_summary = f"Executed: {cmd[:50]}{'...' if len(cmd) > 50 else ''}\nOutput: {result_output[-50:]}"
