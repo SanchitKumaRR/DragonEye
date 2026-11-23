@@ -285,21 +285,6 @@ scans from a machine or VM you control, and do not expose the GUI.
 
 This is a single-user local tool. Do not expose the GUI to a network.
 
-## Not built yet
-
-Ordered roughly by value:
-
-1. **Scope-enforcing proxy hookup** (mitmproxy/Caido) for network-level
-   enforcement, not just target-list filtering.
-2. **Run-to-run diffing in the GUI** (the data is there; the UI only shows the latest run).
-3. **Notifications** (Discord/Telegram/webhook on new findings).
-4. **Screenshots** (gowitness) and a port/service adapter (naabu/nmap).
-5. **More adapters** (gau, waybackurls, chaos, assetfinder, ffuf).
-6. **Batch triage** — the `batch_size` budget field exists but triage is per-finding.
-7. **Calibration dashboard**, program importers (HackerOne API), scheduled runs.
-8. **PyPI publication** — `pipx install .` works from a checkout; no wheel is
-   published yet.
-
 ## Development
 
 ```bash
