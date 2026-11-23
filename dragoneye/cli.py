@@ -8,10 +8,8 @@ import webbrowser
 from pathlib import Path
 
 import typer
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from . import __version__, db
 from .config import (
@@ -26,14 +24,19 @@ from .config import (
     save_config,
     set_api_key,
 )
+from .doctor import overall as doctor_overall
+from .doctor import run_checks
+from .doctor import summary as doctor_summary
 from .llm.providers import all_models, get_provider
 from .pipeline import pipeline_summary, start_run
-from .llm.client import LLMClient
+from .quick import program_name_for, quick_run
 from .scope import Scope, ScopeError
 from .tools import status as tool_status
+from .ui import banner as _banner
+from .ui import console, severity_counts, severity_markup
 
 app = typer.Typer(
-    add_completion=False,
+    add_completion=True,
     no_args_is_help=True,
     help="Scope-aware recon framework for bug bounty hunters.",
 )
@@ -41,37 +44,6 @@ program_app = typer.Typer(no_args_is_help=True, help="Manage programs (scope + p
 config_app = typer.Typer(no_args_is_help=True, help="Settings and API keys.")
 app.add_typer(program_app, name="program")
 app.add_typer(config_app, name="config")
-
-console = Console()
-SEV_STYLE = {
-    "critical": "bold red",
-    "high": "red",
-    "medium": "yellow",
-    "low": "green",
-    "info": "cyan",
-}
-
-BANNER = r"""
-████████▄     ▄████████    ▄████████    ▄██████▄   ▄██████▄  ███▄▄▄▄      ▄████████ ▄██   ▄      ▄████████
-███   ▀███   ███    ███   ███    ███   ███    ███ ███    ███ ███▀▀▀██▄   ███    ███ ███   ██▄   ███    ███
-███    ███   ███    ███   ███    ███   ███    █▀  ███    ███ ███   ███   ███    █▀  ███▄▄▄███   ███    █▀
-███    ███  ▄███▄▄▄▄██▀   ███    ███  ▄███        ███    ███ ███   ███  ▄███▄▄▄     ▀▀▀▀▀▀███  ▄███▄▄▄
-███    ███ ▀▀███▀▀▀▀▀   ▀███████████ ▀▀███ ████▄  ███    ███ ███   ███ ▀▀███▀▀▀     ▄██   ███ ▀▀███▀▀▀
-███    ███ ▀███████████   ███    ███   ███    ███ ███    ███ ███   ███   ███    █▄  ███   ███   ███    █▄
-███   ▄███   ███    ███   ███    ███   ███    ███ ███    ███ ███   ███   ███    ███ ███   ███   ███    ███
-████████▀    ███    ███   ███    █▀    ████████▀   ▀██████▀   ▀█   █▀    ██████████  ▀█████▀    ██████████
-             ███    ███
-"""
-
-
-def _banner() -> None:
-    """Print the wordmark in red without letting rich wrap or crop it."""
-    width = max(len(line) for line in BANNER.splitlines())
-    Console(width=width).print(Text(BANNER, style="bold red"), no_wrap=True, crop=False)
-    console.print(
-        f"  [red]scope-aware recon[/red] [dim]v{__version__}[/dim] · "
-        "[dim]only scan assets you are authorized to test[/dim]\n"
-    )
 
 
 def _con():
@@ -113,6 +85,52 @@ def _run_or_exit(ref: str) -> dict:
     return run
 
 
+def _print_result(result: dict, *, limit: int = 15) -> None:
+    """Shared end-of-run summary for `run`, `resume` and `quick`."""
+    report = result.get("report") or {}
+    stats = result.get("stats") or {}
+    data = result.get("summary") or {}
+    findings = data.get("findings") or []
+    status = result.get("status", "?")
+    status_style = "green" if status == "done" else "red"
+
+    console.print()
+    console.print(Panel.fit(
+        f"run      : [bold]{result.get('id')}[/bold]  [{status_style}]{status}[/{status_style}]\n"
+        f"assets   : {stats.get('assets_total', 0)}\n"
+        f"findings : {stats.get('findings_total', 0)}"
+        + (f"  ({severity_counts(findings)})" if findings else "") + "\n"
+        f"scope    : {stats.get('skipped_scope', 0)} target(s) rejected\n"
+        f"report   : {report.get('html', '-')}\n"
+        f"markdown : {report.get('md', '-')}",
+        title="done",
+    ))
+    if findings:
+        table = Table(box=None, pad_edge=False)
+        for column in ("id", "severity", "title", "asset", "conf", "verdict"):
+            table.add_column(column, no_wrap=(column not in ("title", "asset")))
+        for finding in findings[:limit]:
+            table.add_row(
+                str(finding.get("id")),
+                severity_markup(finding.get("severity")),
+                (finding.get("title") or "")[:52],
+                (finding.get("asset_value") or "")[:36],
+                f"{finding['confidence']}%" if finding.get("confidence") is not None else "-",
+                finding.get("verdict") or "-",
+            )
+        console.print(table)
+        if len(findings) > limit:
+            console.print(f"[dim]... {len(findings) - limit} more - dragoneye show last[/dim]")
+    for tool in data.get("tools") or []:
+        if tool.get("status") == "missing":
+            console.print(f"[yellow]! {tool['tool']} missing[/yellow] - {tool.get('message')}")
+    console.print(
+        "\n[dim]next:[/dim] [bold]dragoneye show last[/bold] · "
+        "[bold]dragoneye diff " + str(stats.get("program", "")) + "[/bold] · "
+        "[bold]dragoneye report last --open[/bold]"
+    )
+
+
 # --- top level ------------------------------------------------------------
 
 
@@ -129,11 +147,136 @@ def init() -> None:
         f"data   : {data_dir()}\n"
         f"db     : {db_path()}\n\n"
         "Next:\n"
-        "  1. dragoneye program add acme --in-text 'acme.com'\n"
-        "  2. dragoneye tools\n"
-        "  3. dragoneye run acme --passive",
+        "  1. dragoneye doctor                 # what works on this machine\n"
+        "  2. dragoneye quick example.com      # one-shot recon\n"
+        "  3. dragoneye                        # interactive console\n"
+        "  4. dragoneye --help                 # every command",
         title="init",
     ))
+
+
+@app.command()
+def shell() -> None:
+    """Open the interactive console (the recommended way to use DragonEye)."""
+    _banner()
+    from .console import run_console
+
+    run_console()
+
+
+@app.command()
+def quick(
+    target: str = typer.Argument(..., help="Domain, URL, IP or host to recon."),
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Print commands, send no traffic."),
+    passive: bool = typer.Option(False, "--passive", help="Passive tools only."),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Skip model triage."),
+    usage: str | None = typer.Option(None, "--usage", help="off|low|balanced|high"),
+    provider: str | None = typer.Option(None, "--provider"),
+    model: str | None = typer.Option(None, "--model"),
+    allow_private: bool = typer.Option(False, "--allow-private", help="Permit private/loopback targets."),
+    open_report: bool = typer.Option(False, "--open", help="Open the HTML report when done."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the live-scan confirmation."),
+) -> None:
+    """One-shot recon: derive a program from a target, run, report.
+
+    The fast path. `dragoneye quick example.com` creates (or extends) a program
+    named after the target and runs the full pipeline.
+
+    \b
+    dragoneye quick example.com              full run, confirm once
+    dragoneye quick example.com --dry-run    print the exact commands
+    dragoneye quick app.example.com --passive  passive only
+    """
+    if usage and usage not in USAGE_LEVELS:
+        raise typer.BadParameter(f"usage must be one of {', '.join(USAGE_LEVELS)}")
+
+    cfg = load_config()
+    if allow_private:
+        cfg.allow_private = True
+    if no_llm:
+        usage = "off"
+
+    try:
+        from .quick import derive_host
+
+        host = derive_host(target)
+    except ScopeError as exc:
+        console.print(f"[red]invalid target: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    name = program_name_for(host)
+    _banner()
+    console.print(Panel.fit(
+        f"target   : [bold]{host}[/bold]\n"
+        f"program  : {name}\n"
+        f"mode     : {'DRY RUN' if dry_run else ('passive-only' if passive else 'passive + active')}\n"
+        f"model    : {usage or cfg.llm.usage}",
+        title="quick",
+    ))
+    if not dry_run and not yes:
+        if not sys.stdin.isatty():
+            console.print(
+                "[red]refusing a live scan without a terminal[/red] - "
+                "pass [bold]--yes[/bold] or [bold]--dry-run[/bold]."
+            )
+            raise typer.Exit(2)
+        if not typer.confirm(f"Run live recon against {host}?", default=True):
+            console.print("[yellow]cancelled[/yellow]")
+            raise typer.Exit(0)
+
+    con = _con()
+    try:
+        result = quick_run(
+            con,
+            target,
+            cfg,
+            dry_run=dry_run,
+            passive=passive,
+            usage=usage,
+            provider=provider,
+            model=model,
+            echo=lambda message: console.print(message, highlight=False),
+        )
+        result["summary"] = pipeline_summary(con, result["id"])
+    except ScopeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    finally:
+        con.close()
+
+    _print_result(result)
+    if open_report and (result.get("report") or {}).get("html"):
+        webbrowser.open(Path(result["report"]["html"]).as_uri())
+
+
+@app.command()
+def doctor(
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Diagnose the environment and tell you exactly what to fix."""
+    checks = run_checks()
+    if json_out:
+        console.print_json(json.dumps(
+            [check.__dict__ for check in checks],
+            indent=2,
+        ))
+        raise typer.Exit(0 if doctor_overall(checks) != "fail" else 1)
+
+    table = Table(box=None, pad_edge=False)
+    table.add_column("check", style="bold")
+    table.add_column("status")
+    table.add_column("detail", overflow="fold")
+    table.add_column("hint", overflow="fold", style="dim")
+    styles = {"ok": "[green]ok[/green]", "warn": "[yellow]warn[/yellow]", "fail": "[red]fail[/red]"}
+    for check in checks:
+        table.add_row(check.name, styles.get(check.status, check.status), check.detail, check.hint)
+    console.print(table)
+    line = doctor_summary(checks)
+    state = doctor_overall(checks)
+    if state == "fail":
+        console.print(f"\n[red]{line}[/red]")
+        raise typer.Exit(1)
+    console.print(f"\n[{'yellow' if state == 'warn' else 'green'}]{line}[/]")
 
 
 @app.command()
@@ -226,24 +369,11 @@ def run(
             model=model,
             echo=lambda message: console.print(message, highlight=False),
         )
+        result["summary"] = pipeline_summary(con, result["id"])
     finally:
         con.close()
 
-    report = result.get("report") or {}
-    stats = result.get("stats") or {}
-    console.print()
-    console.print(Panel.fit(
-        f"run      : [bold]{result.get('id')}[/bold]\n"
-        f"status   : {result.get('status')}\n"
-        f"assets   : {stats.get('assets_total', 0)}\n"
-        f"findings : {stats.get('findings_total', 0)}\n"
-        f"scope    : {stats.get('skipped_scope', 0)} target(s) rejected\n"
-        f"report   : {report.get('html', '-')}\n"
-        f"markdown : {report.get('md', '-')}",
-        title="done",
-    ))
-    if report.get("html"):
-        console.print(f"[dim]open with: xdg-open {report['html']}[/dim]")
+    _print_result(result)
 
 
 @app.command()
@@ -261,9 +391,10 @@ def resume(run_id: str = typer.Argument(...)) -> None:
             resume_run_id=existing["id"],
             echo=lambda message: console.print(message, highlight=False),
         )
+        result["summary"] = pipeline_summary(con, result["id"])
     finally:
         con.close()
-    console.print(f"[green]run {result.get('id')} {result.get('status')}[/green]")
+    _print_result(result)
 
 
 @app.command("runs")
@@ -321,14 +452,14 @@ def show(run_id: str = typer.Argument("last")) -> None:
     ))
 
     if data["findings"]:
+        console.print(f"\n{severity_counts(data['findings'])}\n")
         table = Table(box=None, pad_edge=False)
         for column in ("id", "severity", "title", "asset", "conf", "verdict"):
-            table.add_column(column)
+            table.add_column(column, no_wrap=(column not in ("title", "asset")))
         for finding in data["findings"]:
-            severity = (finding.get("severity") or "info").lower()
             table.add_row(
                 str(finding["id"]),
-                f"[{SEV_STYLE.get(severity, 'white')}]{severity}[/]",
+                severity_markup(finding.get("severity")),
                 (finding.get("title") or "")[:48],
                 (finding.get("asset_value") or "")[:36],
                 f"{finding['confidence']}%" if finding.get("confidence") is not None else "-",
@@ -340,7 +471,93 @@ def show(run_id: str = typer.Argument("last")) -> None:
 
     for tool in data["tools"]:
         if tool["status"] == "missing":
-            console.print(f"[yellow]! {tool['tool']} missing - {tool.get('message')}[/yellow]")
+            console.print(f"[yellow]! {tool['tool']} missing[/yellow] - {tool.get('message')}")
+    console.print(
+        f"\n[dim]next:[/dim] [bold]dragoneye diff {row.get('program_name')}[/bold] · "
+        "[bold]dragoneye report last --open[/bold] · "
+        "[bold]dragoneye audit --run last[/bold]"
+    )
+
+
+@app.command()
+def assets(
+    program: str | None = typer.Argument(None, help="Limit to one program."),
+    kind: str | None = typer.Option(None, "--kind", "-k", help="domain|url|ip"),
+    search: str | None = typer.Option(None, "--search", "-s", help="Substring filter."),
+    limit: int = typer.Option(500, "--limit"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """List the cumulative asset inventory across all runs."""
+    con = _con()
+    program_id = None
+    if program:
+        row = db.get_program(con, program)
+        if not row:
+            con.close()
+            console.print(f"[red]unknown program {program!r}[/red]")
+            raise typer.Exit(2)
+        program_id = int(row["id"])
+    rows = db.list_assets(con, program_id, kind=kind, search=search, limit=limit)
+    con.close()
+    if as_json:
+        console.print_json(json.dumps(rows, indent=2))
+        return
+    table = Table(box=None, pad_edge=False)
+    for column in ("program", "kind", "asset", "source", "last seen"):
+        table.add_column(column, no_wrap=(column != "asset"))
+    for row in rows:
+        table.add_row(
+            row.get("program_name", "?"),
+            row["kind"],
+            row["value"],
+            row.get("source_tool") or "-",
+            (row.get("last_seen_run") or "-")[:12],
+        )
+    console.print(table)
+    console.print(f"\n[dim]{len(rows)} asset(s) shown[/dim]")
+
+
+@app.command()
+def findings(
+    program: str | None = typer.Argument(None, help="Limit to one program."),
+    severity: str | None = typer.Option(None, "--severity", "-s"),
+    search: str | None = typer.Option(None, "--search", help="Title/asset/template substring."),
+    limit: int = typer.Option(500, "--limit"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """List every known finding across all runs."""
+    con = _con()
+    program_id = None
+    if program:
+        row = db.get_program(con, program)
+        if not row:
+            con.close()
+            console.print(f"[red]unknown program {program!r}[/red]")
+            raise typer.Exit(2)
+        program_id = int(row["id"])
+    rows = db.list_findings(con, program_id, severity=severity, search=search, limit=limit)
+    con.close()
+    if as_json:
+        console.print_json(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        console.print("[dim]no findings recorded[/dim]")
+        return
+    table = Table(box=None, pad_edge=False)
+    for column in ("id", "program", "severity", "title", "asset", "conf", "verdict"):
+        table.add_column(column, no_wrap=(column not in ("title", "asset")))
+    for row in rows:
+        table.add_row(
+            str(row["id"]),
+            row.get("program_name", "?"),
+            severity_markup(row.get("severity")),
+            (row.get("title") or "")[:48],
+            (row.get("asset_value") or "")[:36],
+            f"{row['confidence']}%" if row.get("confidence") is not None else "-",
+            row.get("verdict") or "-",
+        )
+    console.print(table)
+    console.print(f"\n[dim]{len(rows)} finding(s) shown[/dim]")
 
 
 @app.command()
@@ -452,182 +669,37 @@ def audit(
 
 @app.command()
 def awaken() -> None:
-    """Awaken DragonEye (switch theme to red and enable AI chatbot mode)."""
+    """Wake the dragon: red theme plus the interactive console."""
     cfg = load_config()
-    if cfg.theme == "awakened":
-        console.print("[yellow]DragonEye is already awakened.[/yellow]")
-    else:
+    if cfg.theme != "awakened":
         cfg.theme = "awakened"
         save_config(cfg)
-        _banner()
-        console.print("[bold red]DragonEye awakened![/bold red]")
-        console.print("Theme switched to bright red. Proceed with caution.")
-    # Select provider ONCE at the start
-    from dragoneye.llm import provider_list
-    providers = provider_list()
-    print("Available providers:")
-    for i, p in enumerate(providers, 1):
-        print("  " + str(i) + ". " + p['label'] + " (" + p['id'] + ") - Models: " + ", ".join(p['models'][:2]))
-    provider_choice = typer.prompt("Select provider number", default=str(len(providers)))
-    try:
-        provider_idx = int(provider_choice) - 1
-        if provider_idx < 0 or provider_idx >= len(providers):
-            provider_idx = 0
-    except ValueError:
-        provider_idx = 0
-    provider_id = providers[provider_idx]['id']
-    # Select model ONCE at the start
-    available_models = providers[provider_idx]['models']
-    print("Available models:")
-    for i, model in enumerate(available_models, 1):
-        print("  " + str(i) + ". " + model)
-    model_choice = typer.prompt("Select model number (or type model name)")
-    try:
-        model_idx = int(model_choice) - 1
-        if 0 <= model_idx < len(available_models):
-            selected_model = available_models[model_idx]
-        else:
-            selected_model = available_models[0]
-    except ValueError:
-        if model_choice in available_models:
-            selected_model = model_choice
-        else:
-            selected_model = available_models[0]
-    # Persistent conversation context
-    context = []  # List of (task, result_summary) tuples
-    # Chatbot loop in awakened mode
-    while cfg.theme == "awakened":
-        # Build context prompt from previous tasks
-        context_prompt = ""
-        if context:
-            context_prompt = "\n\nPrevious task results:"
-            for i, (prev_task, prev_result_summary) in enumerate(context[-3:], 1):
-                context_prompt += f"\n\nTask {i}: {prev_task}\nResult: {prev_result_summary}"
-        # Ask for task
-        task = typer.prompt("What task would you like DragonEye to perform? (type 'slumber' to exit awakened mode" + context_prompt + ")")
-        if task.lower() == 'slumber':
-            cfg.theme = "normal"
-            save_config(cfg)
-            _banner()
-            console.print("[bold green]DragonEye slumbered![/bold green]")
-            console.print("Theme returned to normal (green).")
-            break
-        if not task:
-            console.print("[red]No task specified.[/red]")
-            continue
-        console.print("[italic]Processing task: " + task + "[/italic]")
-        # Process task with AI model
-        try:
-            client = LLMClient(provider_id, selected_model)
-            part1 = "The user wants you to: " + task + "\n\n"
-            part2 = "Please output ONLY the shell commands you would run to accomplish this task. "
-            part3 = "You CAN use sudo. Just output the commands, one per line, without any explanation "
-            part4 = "or conversational text. Be concise and direct."
-            # Build JSON context for AI model (internal use, not user-cluttered)
-            ai_context = []
-            if context:
-                for prev_task, prev_result in context[-3:]:
-                    result_summary = prev_result[:200] + "..." if len(prev_result) > 200 else prev_result
-                    ai_context.append({
-                        "user_input": prev_task,
-                        "model_output": result_summary
-                    })
-            context_json = json.dumps(ai_context, indent=2) if ai_context else ""
-            prompt_text = part1 + part2 + part3 + part4 + "\n\n" + context_json
-            response = client.chat(messages=[
-                {"role": "system", "content": "You are a shell command executor. You MUST output ONLY the commands to run, one per line, without any explanation, commentary, or conversational text. You CAN use sudo. Be concise and direct. Your outputs will be executed on a Linux system."},
-                {"role": "user", "content": prompt_text}
-            ],
-                temperature=0.7,
-            )
-            if response and hasattr(response, 'text') and response.text:
-                console.print("\n[bold]AI commands:[/bold]")
-                commands = response.text.strip().split("\n")
-                for i, cmd in enumerate(commands, 1):
-                    cmd = cmd.strip()
-                    if cmd and not cmd.startswith("#"):
-                        console.print(" " + str(i) + ". [bold cyan]" + cmd + "[/bold cyan]")
-                console.print("\n[bold]Execute these commands?[/bold] (y/n)")
-                if not typer.confirm("", default=True):
-                    console.print("[yellow]Commands skipped.[/yellow]")
-                    continue
-                dry_run = False
-                # Join commands into single string if multiple, otherwise use single
-                if len(commands) == 1:
-                    cmd = commands[0].strip()
-                else:
-                    cmd = "\n".join(c.strip() for c in commands if c.strip())
-                # Validate command safety before execution
-                if cmd and not cmd.startswith("#"):
-                    dangerous_patterns = ["rm -rf /", "dd if=", "mkfs", "> /dev/"]
-                    is_dangerous = any(pattern in cmd for pattern in dangerous_patterns)
-                    if is_dangerous:
-                        console.print("[red]WARNING: Potentially dangerous command detected![/red]")
-                        console.print("This command may cause data loss or system damage.")
-                        if not typer.confirm("", default=False):
-                            console.print("[yellow]Command skipped due to safety check.[/yellow]")
-                            continue
-                    # Execute or dry-run based on mode
-                    if dry_run:
-                        console.print("[dim]Dry-run mode: Would execute: [/dim][bold cyan]" + cmd + "[/bold cyan]")
-                        result = type('obj', (object,), {'stdout': cmd, 'stderr': '', 'returncode': 0})()
-                    else:
-                        try:
-                            result = subprocess.run(
-                                cmd,
-                                shell=True,
-                                capture_output=True,
-                                text=True,
-                                timeout=30)
-                            # Log executed command
-                            import datetime
-                            log_entry = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] CMD: {cmd[:80]}..."
-                            console.print("[dim]" + log_entry + "[/dim]")
-                        except subprocess.TimeoutExpired:
-                            console.print("[red]Command timed out after 30 seconds.[/red]")
-                            result = type('obj', (object,), {'stdout': '', 'stderr': 'Command timed out', 'returncode': -1})()
-                    # Handle command execution results
-                    if result and result.returncode != 0:
-                        console.print("[red]Command failed with exit code: " + str(result.returncode) + "[/red]")
-                        console.print("[red]STDERR: " + result.stderr[-200:] + "[/red]")
-                        if not typer.confirm("", default=False):
-                            console.print("[yellow]Task failed, skipping to next task.[/yellow]")
-                            continue
-                    elif result and result.returncode == 0:
-                        console.print("[green]Command executed successfully.[/green]")
-                        console.print("[green]STDOUT: " + result.stdout[-200:] + "[/green]")
-                else:
-                    console.print("[yellow]No valid commands to execute.[/yellow]")
-                    result = None
-                    result_output = result.stdout[-100:] + "\n" + result.stderr[-100:]
-                    # Store in context - summary of what happened
-                    result_summary = f"Executed: {cmd[:50]}{'...' if len(cmd) > 50 else ''}\nOutput: {result_output[-50:]}"
-                    context.append((task, result_summary))
-                    if len(context) > 10:
-                        context = context[-10:]
-                    console.print("[stdout]" + result.stdout[-100:])
-                    console.print("[stderr]" + result.stderr[-100:])
-                    console.print("[exit code]" + str(result.returncode))
-            else:
-                console.print("[red]No response from AI model.[/red]")
-        except Exception as e:
-            console.print("[red]Error processing task: " + str(e) + "[/red]")
-    # Loop ended - return to normal theme
-    if cfg.theme == "normal":
-        _banner()
-        console.print("\n[green]Returning to normal mode.[/green]")
+    _banner("bold red")
+    console.print(
+        Panel.fit(
+            "[bold red]DragonEye awakened.[/bold red]\n\n"
+            "Type [bold]help[/bold] for commands, [bold]exit[/bold] to leave.",
+            title="awakened",
+        )
+    )
+    from .console import run_console
+
+    run_console(theme="awakened")
+
+
 @app.command()
 def slumber() -> None:
-    """Put DragonEye to slumber (return to normal theme)."""
+    """Return to the normal theme."""
     cfg = load_config()
     if cfg.theme == "normal":
-        console.print("[yellow]DragonEye is already in normal state.[/yellow]")
+        console.print("[yellow]DragonEye is already in the normal state.[/yellow]")
         return
     cfg.theme = "normal"
     save_config(cfg)
     _banner()
-    console.print("[bold green]DragonEye slumbered![/bold green]")
-    console.print("Theme returned to normal (green).")
+    console.print("[bold green]DragonEye returned to normal.[/bold green]")
+
+
 @app.command()
 def serve(
     host: str | None = typer.Option(None, "--host"),
@@ -883,26 +955,32 @@ def _coerce(value: str, current: object) -> object:
 
 
 def _quick_help() -> None:
-    """Landing page for a bare `dragoneye` invocation."""
+    """Landing page for a bare, non-interactive `dragoneye` invocation."""
     table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     table.add_column(style="bold red", no_wrap=True)
     table.add_column(style="dim", no_wrap=True)
     for cmd, desc in (
-        ("dragoneye init", "create config, database and run directories"),
-        ("dragoneye program add NAME --in-text 'example.com'", "define an authorized scope"),
-        ("dragoneye tools", "check which recon binaries are installed"),
-        ("dragoneye run NAME --active", "scan, triage and write a report"),
-        ("dragoneye show last", "results of the most recent run"),
+        ("dragoneye quick example.com", "one-shot: scope + scan + report"),
+        ("dragoneye", "interactive console (recommended)"),
+        ("dragoneye doctor", "check what works on this machine"),
+        ("dragoneye program add NAME --in-text 'example.com'", "define a managed scope"),
+        ("dragoneye run NAME --active", "scan a saved program"),
+        ("dragoneye show last", "latest results"),
         ("dragoneye serve --open", "local web GUI on 127.0.0.1"),
         ("dragoneye --help", "all commands and options"),
     ):
         table.add_row(cmd, desc)
-    Console(width=110).print(table)
+    console.print(table)
 
 
 def main() -> None:
     argv = sys.argv[1:]
     if not argv:
+        if sys.stdin.isatty():
+            from .console import run_console
+
+            run_console()
+            raise SystemExit(0)
         _banner()
         _quick_help()
         raise SystemExit(0)

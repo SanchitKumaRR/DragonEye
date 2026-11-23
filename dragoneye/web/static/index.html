@@ -58,7 +58,7 @@ button.wide{width:100%;margin-top:8px}
 button:disabled{opacity:.45;cursor:not-allowed}
 input,select,textarea{
   width:100%;font:inherit;font-size:12.5px;background:#140a0a;color:#e8d5d8;
-  border:1px solid:#2a1515;border-radius:4px;padding:7px 9px;outline:none;
+  border:1px solid #2a1515;border-radius:4px;padding:7px 9px;outline:none;
 }
 input:focus,select:focus,textarea:focus{border-color:var(--acc)}
 textarea{resize:vertical;line-height:1.5}
@@ -564,27 +564,28 @@ function renderReport(runId) {
 async function loadTools() {
   try {
     const data = await api("/api/tools");
-    STATE.providers = data.providers || [];
     $("tool-list").innerHTML = (data.tools || []).map((t) => `
       <div class="tool" title="${esc(t.installed ? (t.version || "") : (t.install_hint || ""))}">
         <span class="${t.installed ? "ok" : "no"}">${t.installed ? "●" : "○"} ${esc(t.name)}</span>
         <small>${t.passive ? "passive" : "active"}</small>
-        ${t.installed ? "" : `<button class="mini install-btn" data-name="${t.name}">install</button>`}
+        ${t.installed ? "" : `<button class="mini install-btn" data-name="${t.name}">how?</button>`}
       </div>`).join("");
 
     // Add install listeners
     document.querySelectorAll(".install-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const name = btn.dataset.name;
-        $("tool-msg").textContent = `Installing ${name}…`;
-        $("tool-msg").className = "msg";
         try {
-          await api("/api/tools/install", {
+          const data = await api("/api/tools/install", {
             method: "POST",
             body: JSON.stringify({ name }),
           });
-          $("tool-msg").textContent = `${name} installed. Refreshing…`;
-          loadTools();
+          const hint = data.command || data.hint || "see requirements.txt";
+          $("tool-msg").innerHTML = `<b>${esc(name)}</b>: <code>${esc(hint)}</code>`;
+          $("tool-msg").className = "msg";
+          if (navigator.clipboard && data.command) {
+            navigator.clipboard.writeText(data.command).catch(() => {});
+          }
         } catch (err) {
           $("tool-msg").textContent = `Failed: ${err.message}`;
           $("tool-msg").className = "msg err";

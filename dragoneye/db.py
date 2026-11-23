@@ -209,7 +209,7 @@ def add_program(
     policy_note: str | None = None,
 ) -> int:
     now = utcnow()
-    cur = con.execute(
+    con.execute(
         """INSERT INTO programs (name, platform, policy_note, in_scope, out_of_scope,
                                  created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -230,8 +230,6 @@ def add_program(
         ),
     )
     con.commit()
-    if cur.lastrowid:
-        return int(cur.lastrowid)
     row = con.execute("SELECT id FROM programs WHERE name = ?", (name,)).fetchone()
     return int(row["id"])
 
@@ -439,6 +437,80 @@ def diff_assets(con: sqlite3.Connection, program_id: int, run_id: str) -> list[d
             WHERE ra.run_id = ? AND a.program_id = ? AND a.in_scope = 1 AND ra.is_new = 1
             ORDER BY a.kind, a.value""",
         (run_id, program_id),
+    ).fetchall()
+    return _rows(rows)
+
+
+def list_assets(
+    con: sqlite3.Connection,
+    program_id: int | None = None,
+    *,
+    kind: str | None = None,
+    search: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """The cumulative in-scope asset inventory (not just one run)."""
+    clauses = ["a.in_scope = 1"]
+    params: list[Any] = []
+    if program_id is not None:
+        clauses.append("a.program_id = ?")
+        params.append(program_id)
+    if kind:
+        clauses.append("a.kind = ?")
+        params.append(kind)
+    if search:
+        clauses.append("a.value LIKE ?")
+        params.append(f"%{search}%")
+    params.append(limit)
+    rows = con.execute(
+        f"""SELECT a.*, p.name AS program_name
+              FROM assets a JOIN programs p ON p.id = a.program_id
+             WHERE {' AND '.join(clauses)}
+             ORDER BY p.name, a.kind, a.value
+             LIMIT ?""",
+        params,
+    ).fetchall()
+    return _rows(rows)
+
+
+def list_findings(
+    con: sqlite3.Connection,
+    program_id: int | None = None,
+    *,
+    severity: str | None = None,
+    search: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Every known finding, newest first, with its latest model verdict."""
+    clauses = ["1 = 1"]
+    params: list[Any] = []
+    if program_id is not None:
+        clauses.append("f.program_id = ?")
+        params.append(program_id)
+    if severity:
+        clauses.append("lower(f.severity) = ?")
+        params.append(severity.lower())
+    if search:
+        clauses.append("(f.title LIKE ? OR a.value LIKE ? OR f.template_id LIKE ?)")
+        needle = f"%{search}%"
+        params.extend([needle, needle, needle])
+    params.append(limit)
+    rows = con.execute(
+        f"""SELECT f.*, p.name AS program_name, a.value AS asset_value,
+                   (SELECT v.verdict FROM llm_verdicts v WHERE v.finding_id = f.id
+                     ORDER BY v.id DESC LIMIT 1) AS verdict,
+                   (SELECT v.confidence FROM llm_verdicts v WHERE v.finding_id = f.id
+                     ORDER BY v.id DESC LIMIT 1) AS confidence
+              FROM findings f
+              JOIN programs p ON p.id = f.program_id
+              LEFT JOIN assets a ON a.id = f.asset_id
+             WHERE {' AND '.join(clauses)}
+             ORDER BY CASE lower(COALESCE(f.severity,'info'))
+                        WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
+                        WHEN 'low' THEN 3 ELSE 4 END,
+                      f.title
+             LIMIT ?""",
+        params,
     ).fetchall()
     return _rows(rows)
 

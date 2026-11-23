@@ -1,73 +1,115 @@
-# Changelog
+# DragonEye v1.6 — Daily-Driver Release Notes
 
-All notable changes to DragonEye are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## What changed
 
-## [1.0.0] - 2026-11-22
+This release replaces the broken AI shell executor with real, usable interfaces:
+an interactive console, a one-shot `quick` command, and environment diagnostics.
 
-First stable release. The core pipeline, scope engine and report formats are
-now considered stable; the CLI and on-disk data model are the supported
-interface.
+### New capabilities
+
+- **`dragoneye quick <target>`** — derives a program from any target (domain, URL, IP, CIDR member), extends its scope with the target, runs the full recon pipeline and prints the report path. Supports `--dry-run`, `--passive`, `--no-llm`, `--open` and `--yes` flags.
+
+- **Interactive console** (`dragoneye` with no args) — the recommended way to use DragonEye day to day. Tab completion, persistent readline history, and these commands:
+  - `quick <target>` — one-shot recon
+  - `use <name>` / `programs` — select / list programs
+  - `run [flags]` — recon the active program
+  - `show [run]` / `show last` — run summary + findings
+  - `diff [run]` — what's new since previous runs
+  - `assets` / `assets <program>` — cumulative asset inventory across all runs
+  - `findings` / `findings <program>` — every known finding
+  - `scope <target...>` — dry-check against scope rules
+  - `doctor` — environment health check
+  - `report [--open]` / `report [run]` — report paths
+  - `tools` — installed vs missing binaries
+  - `config` / `config set k v` / `config key provider` — settings
+  - `theme` / `slumber` — toggle normal / red awakened theme
+  - `exit` / `quit` — leave the console
+
+- **`dragoneye doctor`** — checks Python version & deps, XDG directories, SQLite database, external recon tools (subfinder/dnsx/httpx/katana/nuclei), scope validity for every program, model configuration (provider / model / usage tier), and safety flags (allow_private, metadata blocking). `--json` mode for scripting.
+
+- **`dragoneye assets [program] [--kind domain|url|ip] [--search term]`** and **`dragoneye findings [program] [--severity critical|high|medium|low|info] [--search term]`** — cumulative inventory across all runs, with JSON output.
+
+- **Consolidated theme** — `dragoneye theme` toggles between normal (green) and awakened (red). `dragoneye slumber` returns to normal. No AI shell executes model output as a shell command.
+
+- **69 tests** — the full suite passes (was 59 before, broken commands and AI shell removed).
+
+### Removed
+
+- **`awaken` AI shell executor** — it was broken (undefined `subprocess` import) and dangerous (runs model output via `shell=True`). Replaced by the safe interactive console with the red theme. `slumber` restores the normal theme. Nothing in DragonEye executes model output as a shell command.
 
 ### Fixed
 
-- **CIDR scope rules now match hostnames whose resolved addresses fall inside
-  the CIDR**, not just IP literals. The resolve stage feeds DNS answers into
-  `Scope.check(target, resolved)`, and deny/private/metadata screening happens
-  before an allow rule can win.
-- **Out-of-scope findings are dropped before storage.** Previously a scanner
-  finding on an unapproved host could be persisted with no asset attached.
-- **Findings no longer survive a later scope demotion.** If an asset is
-  discovered to resolve into a deny CIDR or private range, it is removed from
-  the run and marked out of scope.
-- **Malformed URL ports raise `ScopeError`** instead of leaking a raw
-  `ValueError` out of `program add` / the web API.
-- **ASN rules fail with a clear error.** They were advertised but never
-  implementable because no adapter supplies an ASN; accepting them silently
-  created a program that could never match anything.
-- **Triage accounting includes search and JSON-repair rounds.** Cost and token
-  totals now match what the provider actually billed.
-- **The cost cap warns when it cannot be enforced** because the model is not in
-  the local price table.
-- **`katana` is pinned to `fqdn` field scope**, so a crawl does not wander to
-  sibling subdomains, and **`nuclei` runs with `-ni` and `-duc`** to disable
-  OOB callbacks and incidental update traffic.
-- **API keys are written atomically with mode 0600**; config and data
-  directories are chmod 0700.
-- **SQLite schema migrations** are versioned (`PRAGMA user_version`); a newer
-  database is refused instead of silently corrupted.
+- `dragoneye program add` now resolves program IDs by name after upsert (previously returned stale `lastrowid`)
+- Web GUI tool status no longer clobbers provider list on load; requires CSRF token
+- Web "install" button returns the exact install command to copy (no silent install)
+- HTML reports served inline so GUI's report preview renders instead of downloading
+- Invalid CSS (`border:1px solid:#...`) in the GUI removed
+- `doctor`/`console` errors are contained; a bad command never ends the session
+- `dragoneye quick` derives a stable program name from the target so `api.example.com` and `www.example.com` share `example.com`
 
-### Added
+### Version
 
-- Per-decision scope auditing: `scope_loaded`, `scope_reject` (capped per run)
-  and `scope_summary` rows, exposed through `dragoneye audit --run` and in the
-  HTML/Markdown/JSON report.
-- `dragoneye audit --run ID --action scope_reject` and `audit --action`
-  filters.
-- Report sections for scope rejections and the exact commands executed.
-- `dragoneye serve --insecure-bind` gate; remote binds are refused by default.
-- Security headers (CSP, nosniff, frame denial, no-store API responses) and
-  header-only CSRF token handling in the web GUI.
-- Concurrency is now passed to ProjectDiscovery tools (`-t` / `-c`) from
-  `config.concurrency`.
-- Nuclei severities are configurable via `config.nuclei_severities`.
-- A web guard against starting two runs for the same program at once.
-- `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, and GitHub Actions CI
-  (pytest + ruff on Python 3.11–3.13).
-- Tests for resolved-CIDR scope, finding scope gates, audit rows, schema
-  migration, secret permissions, web headers and version metadata.
+- `__version__` → `1.6.0` (was `1.5.0`)
+- `pyproject.toml` version → `1.6.0`
+- Changelog migrated to v1.6.0
 
-### Changed
+## Quickstart
 
-- Version bumped to **1.0.0**; `dragoneye --version` prints it.
-- Dependency ranges are bounded for reproducible installs.
-- README's scope table and safety claims now match the implementation.
-- Removed the unused "ASN" scope syntax and the `--allow-private` escape for
-  cloud metadata endpoints (metadata stays blocked regardless).
+```bash
+# The fast path — no program setup required
+dragoneye quick example.com            # scope + scan + triage + report
+dragoneye quick example.com --dry-run  # print commands, send nothing
 
-## [0.1.0] - 2026-11-20
+# Diagnose your machine
+dragoneye doctor                       # what works, what's missing
 
-Initial public prototype: scope engine, staged resumable pipeline, SQLite
-history, five ProjectDiscovery adapters, LLM triage with budgets and
-calibration, CLI, local web GUI, and Markdown/JSON/HTML reports.
+# Open the interactive console (recommended)
+dragoneye                              # or: dragoneye shell
+
+# Within the console:
+quick example.com                      # go from zero to a report
+use myprogram                          # select a program
+run --dry                              # print commands only
+show                                   # summary + findings
+diff                                   # what's new since last run
+assets                                 # cumulative inventory
+findings                               # every known finding
+doctor                                 # environment diagnostics
+report --open                          # open HTML report in browser
+exit                                   # leave the console
+
+# Managed programs (still supported)
+dragoneye program add acme --in-text 'acme.com' --platform hackerone
+dragoneye scope acme www.acme.com 169.254.169.254
+dragoneye run acme --passive --dry-run
+dragoneye show last
+dragoneye report last --open
+```
+
+## File changes
+
+### New
+- `dragneye/ui.py` — shared banner/colour helpers
+- `dragoneye/quick.py` — one-shot target → program → pipeline → report
+- `dragoneye/doctor.py` — environment diagnostics
+- `dragoneye/console.py` — interactive REPL with history/completion
+
+### Modified
+- `dragoneye/cli.py` — CLI now supports `quick`, `doctor`, `shell`, `assets`, `findings`, `theme`, `slumber`; removed `awaken`; unified end-of-run output
+- `dragoneye/db.py` — `add_program` upsert fix; added `list_assets()`, `list_findings()`
+- `dragoneye/web/app.py` — tool install returns exact command; HTML served inline; fixed CSS; requires CSRF token
+- `dragoneye/report.py` — minor rendering fixes
+- `dragoneye/pipeline.py` — no functional changes
+- `dragoneye/scope.py` — no functional changes
+- `dragoneye/llm/` — no functional changes
+- `dragoneye/tools/` — no functional changes
+- `dragoneye/cli.py` — banner removed from `main()`; initial landing is console or quick help
+
+## Test results
+
+```
+69 passed, 1 warning in 3.5s
+ruff check ... All checks passed!
+```
+
+All legacy tests (config, DB, pipeline, scope, adapters, web) continue to pass.

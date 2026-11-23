@@ -331,6 +331,9 @@ def get_report(run_id: str, format: str = "html", con=Depends(get_db)) -> FileRe
     if not path.exists():
         raise HTTPException(404, "report not generated yet")
     media = {"html": "text/html", "md": "text/markdown", "json": "application/json"}[format]
+    if format == "html":
+        # Inline so the UI's iframe can render the report instead of downloading it.
+        return FileResponse(path, media_type=media)
     return FileResponse(path, media_type=media, filename=f"dragoneye-{run_id}.{format}")
 
 
@@ -383,17 +386,30 @@ def tools() -> dict[str, Any]:
     return {"tools": tool_status(with_version=True)}
 
 
-@app.post("/api/tools/install")
+@app.post("/api/tools/install", dependencies=[Depends(require_token)])
 def install_tool(payload: dict) -> dict[str, Any]:
+    """Return the install command for a missing tool.
+
+    DragonEye never installs binaries itself: doing so means running a package
+    manager or `go install` as whatever user started the GUI. Instead the GUI
+    shows the exact command so the user stays in control.
+    """
     name = payload.get("name", "")
     if not name:
         raise HTTPException(400, "no tool name")
     tool = next((t for t in ADAPTERS if t.spec.name == name), None)
     if not tool:
         raise HTTPException(404, f"unknown tool {name!r}")
-    if tool.spec.installed:
-        return {"ok": True, "installed": True, "version": tool.spec.version}
-    return {"ok": False, "hint": tool.spec.install_hint, "installed": False}
+    installed = tool.available()
+    hint = tool.spec.install_hint
+    command = hint if hint and " " in hint and not hint.lower().startswith(("see", "install")) else ""
+    return {
+        "ok": True,
+        "installed": installed,
+        "hint": hint,
+        "command": command,
+        "version": tool.version() if installed else None,
+    }
 
 
 @app.get("/api/models")

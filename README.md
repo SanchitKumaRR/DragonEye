@@ -12,10 +12,12 @@ score to every finding.
 seed -> subdomains -> resolve -> probe -> crawl -> scan -> triage -> report
 ```
 
-Status: **v1.0 — stable.** 61 models across 16 providers, 5 tool adapters,
-59 tests, resumable pipeline, per-decision scope auditing, Markdown/JSON/HTML
-reports. Scope enforcement is target-list level, not network level — see
-[Safety model](#safety-model) and `SECURITY.md` before a live run.
+Status: **v1.6 — daily-driver release.** Interactive console, one-shot `quick`
+runs, environment diagnostics, cumulative asset/finding inventory, 61 models
+across 16 providers, 5 tool adapters, 69 tests, resumable pipeline, per-decision
+scope auditing, Markdown/JSON/HTML reports. Scope enforcement is target-list
+level, not network level — see [Safety model](#safety-model) and `SECURITY.md`
+before a live run.
 
 ---
 
@@ -53,6 +55,43 @@ Or use `pipx install .` for a fully isolated install.
 
 ## Quickstart
 
+The fast path needs no program setup:
+
+```bash
+dragoneye quick example.com            # scope + scan + triage + report
+dragoneye quick example.com --dry-run  # print the exact commands, send nothing
+dragoneye doctor                       # is this machine ready?
+```
+
+`quick` derives a program named after the target (so `api.example.com` and
+`www.example.com` share `example.com`), adds the target to the program's scope,
+runs the pipeline, and prints the report path plus the next useful commands.
+
+### Interactive console
+
+Run `dragoneye` with no arguments for the console — the recommended way to use
+DragonEye day to day. It gives you tab completion, persistent history at
+`~/.local/share/dragoneye/history`, and the same operations without retyping
+flags:
+
+```text
+dragoneye> quick example.com
+dragoneye[example.com]> run --dry
+dragoneye[example.com]> show
+dragoneye[example.com]> diff
+dragoneye[example.com]> assets
+dragoneye[example.com]> findings
+dragoneye[example.com]> doctor
+dragoneye[example.com]> report --open
+dragoneye[example.com]> exit
+```
+
+`dragoneye shell` opens it explicitly and `dragoneye awaken` opens it with the
+red theme. The console never executes arbitrary AI-generated shell commands;
+each command maps to a known DragonEye operation.
+
+### Managed programs
+
 ```bash
 dragoneye init
 dragoneye program add acme --in-text 'acme.com' --out-text 'blog.acme.com' --platform hackerone
@@ -63,8 +102,14 @@ dragoneye show last
 dragoneye report last --open
 ```
 
-Running `dragoneye` with no arguments prints the red wordmark and the short command
-list; `dragoneye --help` shows every option.
+Inventory across every run (not just the latest):
+
+```bash
+dragoneye assets                     # cumulative in-scope asset table
+dragoneye assets acme --kind url --search admin
+dragoneye findings --severity high
+dragoneye findings --json
+```
 
 Scope from a file (HackerOne/Bugcrowd paste works):
 
@@ -202,12 +247,17 @@ yesterday" is a join, not a diff of text files.
 ```
 dragoneye/
   scope.py        rule parsing + decisions (heavily tested; fail closed)
-  db.py           SQLite schema, dedupe by fingerprint, per-run history
+  db.py           SQLite schema, dedupe by fingerprint, per-run history,
+                  cumulative asset/finding inventory queries
   pipeline.py     stages, resume, ingestion, scope enforcement points
   tools/          base contract, runner (argv-only, timeouts, evidence),
                   adapters.py (subfinder, dnsx, httpx, katana, nuclei)
   llm/            providers, budgets, client (retry + cost), triage
   report.py       json/markdown/html
+  quick.py        one-shot target -> program -> run
+  console.py      interactive REPL (readline history + completion)
+  doctor.py       environment health checks
+  ui.py           shared terminal rendering
   cli.py          typer CLI
   web/            FastAPI + one static HTML file (no npm)
 ```
@@ -270,7 +320,7 @@ Ordered roughly by value:
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pip install -e .
-.venv/bin/python -m pytest -q         # 59 tests
+.venv/bin/python -m pytest -q         # 69 tests
 .venv/bin/ruff check .
 ```
 

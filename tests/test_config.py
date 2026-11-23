@@ -17,8 +17,9 @@ from dragoneye.config import (
 )
 
 
-def test_version_is_one_zero():
-    assert __version__ == "1.0.0"
+def test_version_is_current():
+    # Keep this in sync with dragoneye/__init__.py and pyproject.toml.
+    assert __version__ == "1.6.0"
 
 
 def test_api_key_file_is_0600_and_dir_0700(tmp_path, monkeypatch):
